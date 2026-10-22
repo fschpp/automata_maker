@@ -1,10 +1,10 @@
 # PROGRESS.md — Mechanical Characters Designer (Python + GTK4)
 
 Basado en: Coros et al., *Computational Design of Mechanical Characters* (SIGGRAPH 2013, Disney Research).
-Última actualización: 2026-10-22 · Rama: `main` · Plan: v3.0 · Estado: M0 casi cerrado (falta abrir la ventana GTK en tu máquina); M1 con el núcleo hecho (falta la animación en GTK)
+Última actualización: 2026-10-22 · Rama: `main` · Plan: v3.0 · Estado: M0 y M1 hechos (falta confirmar zoom/pan con el mouse); siguiente: M2
 
 ## Current Focus
-Cerrar M0 (abrir la ventana en tu máquina con `python -m mechchar` y confirmar grilla/zoom/pan) y pasar a M1: `Component`, `Assembly`, conexiones y solver. Objetivo general: llegar lo antes posible al primer "corte vertical" funcional: un cuadrilátero articulado animado en GTK que ajusta una curva dibujada con el mouse (M1 + M2), antes de construir la base de movimientos.
+Pasar a M2: mecanismos parametrizados (cuadrilátero, 5-bar con engranajes, manivela-corredera), marcador y curva trazada, objetivo F, gradiente por Teorema de la Función Implícita y BFGS, con la spline editable en el canvas. Objetivo general: llegar lo antes posible al primer "corte vertical" funcional: un cuadrilátero articulado animado en GTK que ajusta una curva dibujada con el mouse (M1 + M2), antes de construir la base de movimientos.
 
 ## Principios del plan v2
 1. **Cortes verticales, no capas:** cada hito termina en algo que se ve y se prueba en la app. El paper construye la base de movimientos primero; acá la dejamos para M3 como *optimización de velocidad y calidad* de algo que ya funciona.
@@ -92,10 +92,10 @@ Reglas: `ui` depende de `core`, nunca al revés. Las optimizaciones largas corre
 - [x] Revisión de capturas del tramo final (~3:40–4:10 según la barra de progreso, estimación mía): cuadrúpedo "EMA" en WALK y GALOP (render y prototipos físicos) y T-Rex con engranajes cónicos y ejes entre paredes (2026-10-22)
 - [x] Plan v3.0: paredes de soporte en L, engranajes en varias capas sobre ejes perpendiculares a la pared, caja como pila de placas, eje de entrada para taladro y nota sobre engranajes no circulares en el galope (2026-10-22)
 - [x] M1 (núcleo sin GTK): `core/assembly.py` (Component con `z`, conexiones FixedState/Pin/PointOnLine/Phase con offset/Drive, Jacobiano analítico, solver con `least_squares`, continuación por fase, detección de ciclo completo y análisis de DOF/redundancia) y `core/mechanisms.py` (cuadrilátero y manivela-corredera con configuración inicial analítica); 26 tests en verde (curva del acoplador vs. solución analítica con error < 1e-6, manivela-corredera analítica, Jacobiano vs. diferencias finitas) (2026-10-22)
+- [x] M1 (UI): cuadrilátero animado en el canvas con la curva del marcador, botón Pausa y deslizador de fase; `Playback` con 6 tests; 32 tests en total, y prueba de humo de la ventana con Xvfb (2026-10-22)
 
 ### [/] In Progress
-- [/] M1 — Falta solo la parte de UI: Input Driver con t ∈ [0, 1] y animación cíclica del cuadrilátero en el canvas (`add_tick_callback`)
-- [/] M0 — Falta: instalar GTK4 (`sudo apt install python3-gi gir1.2-gtk-4.0 python3-gi-cairo`), ejecutar `python -m mechchar` y confirmar que la ventana dibuja la grilla y responde a rueda/arrastre; luego `git init` y primer commit
+- [/] M0 — Falta confirmar que el zoom (rueda) y el pan (arrastrar) responden en tu máquina; la ventana, la grilla y los ejes ya se ven (captura 2026-10-22)
 
 ### [ ] Todo
 
@@ -109,7 +109,7 @@ Reglas: `ui` depende de `core`, nunca al revés. Las optimizaciones largas corre
 - [x] **Continuación por fase:** cada paso arranca desde la solución anterior para seguir la misma rama de ensamblado (evita saltos de configuración del cuadrilátero)
 - [x] Detección de ciclo completo: rechazar mecanismos que se traban o saltan de rama (condición de Grashof / salto máximo entre fases consecutivas)
 - [x] Detección sobre/subrestringido (mínimo ≠ 0 / Hessiano singular)
-- [ ] Animación cíclica en el canvas (el Input Driver ya existe como `Drive` en el núcleo)
+- [x] Animación cíclica en el canvas: `core/playback.py` (fase total continua, resolución en vivo, seek) + `ui/scene.py` + botón Pausa y deslizador de fase
 - [x] Tests: cuadrilátero y manivela-corredera contra soluciones analíticas; test de gradiente
 
 **M2 — Ajuste de curva sin base de datos (paper §4.2)**
@@ -230,7 +230,7 @@ Personaje 2D → dibujar 1–3 curvas → mecanismo optimizado por curva → un 
 Fuera del MVP: entrenamiento de la métrica, engranajes no circulares, movimiento 3D.
 
 ## Latest Blockers / Discoveries
-- M0: el código GTK (`ui/`) no se pudo ejecutar en el entorno donde se escribió (GTK4 no disponible); solo está verificada la lógica sin GTK. Si algo falla al abrir la ventana, empezar por `ui/canvas.py`.
+- Resuelto: GTK no importaba porque el venv usaba otro Python (3.12 fuera de apt); hay que crear el venv con `/usr/bin/python3 -m venv --system-site-packages .venv`. `scripts/smoke_ui.py` prueba la UI con Xvfb.
 - El video de YouTube (2013) es el material complementario oficial del paper; solo se pudo leer su descripción, que coincide con el abstract. Los ejemplos hay que verlos en el video.
 - El paper no publica código ni la biblioteca exacta de mecanismos: hay que diseñar los tipos propios a partir de la Fig. 4.
 - Decisiones tomadas: 2D con 3 DOF por pieza; hitos como cortes verticales; núcleo sin GTK; dientes enteros en M5.
