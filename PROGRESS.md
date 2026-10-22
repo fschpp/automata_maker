@@ -1,7 +1,7 @@
 # PROGRESS.md — Mechanical Characters Designer (Python + GTK4)
 
 Basado en: Coros et al., *Computational Design of Mechanical Characters* (SIGGRAPH 2013, Disney Research).
-Última actualización: 2026-10-22 · Rama: `main` · Plan: v3.0 · Estado: M0 casi cerrado (falta verificar la ventana GTK en tu máquina)
+Última actualización: 2026-10-22 · Rama: `main` · Plan: v3.0 · Estado: M0 casi cerrado (falta abrir la ventana GTK en tu máquina); M1 con el núcleo hecho (falta la animación en GTK)
 
 ## Current Focus
 Cerrar M0 (abrir la ventana en tu máquina con `python -m mechchar` y confirmar grilla/zoom/pan) y pasar a M1: `Component`, `Assembly`, conexiones y solver. Objetivo general: llegar lo antes posible al primer "corte vertical" funcional: un cuadrilátero articulado animado en GTK que ajusta una curva dibujada con el mouse (M1 + M2), antes de construir la base de movimientos.
@@ -91,8 +91,10 @@ Reglas: `ui` depende de `core`, nunca al revés. Las optimizaciones largas corre
 - [x] M0 (parte automática): `pyproject.toml`, estructura `mechchar/`, CI (ruff + mypy + pytest), `core/viewport.py` (mundo↔pantalla, zoom anclado al cursor, pan, grilla 1-2-5) con 16 tests en verde; `ui/` con `Canvas` (Cairo + `GestureDrag` + `EventControllerScroll`), ventana y `cli.py` (2026-10-22)
 - [x] Revisión de capturas del tramo final (~3:40–4:10 según la barra de progreso, estimación mía): cuadrúpedo "EMA" en WALK y GALOP (render y prototipos físicos) y T-Rex con engranajes cónicos y ejes entre paredes (2026-10-22)
 - [x] Plan v3.0: paredes de soporte en L, engranajes en varias capas sobre ejes perpendiculares a la pared, caja como pila de placas, eje de entrada para taladro y nota sobre engranajes no circulares en el galope (2026-10-22)
+- [x] M1 (núcleo sin GTK): `core/assembly.py` (Component con `z`, conexiones FixedState/Pin/PointOnLine/Phase con offset/Drive, Jacobiano analítico, solver con `least_squares`, continuación por fase, detección de ciclo completo y análisis de DOF/redundancia) y `core/mechanisms.py` (cuadrilátero y manivela-corredera con configuración inicial analítica); 26 tests en verde (curva del acoplador vs. solución analítica con error < 1e-6, manivela-corredera analítica, Jacobiano vs. diferencias finitas) (2026-10-22)
 
 ### [/] In Progress
+- [/] M1 — Falta solo la parte de UI: Input Driver con t ∈ [0, 1] y animación cíclica del cuadrilátero en el canvas (`add_tick_callback`)
 - [/] M0 — Falta: instalar GTK4 (`sudo apt install python3-gi gir1.2-gtk-4.0 python3-gi-cairo`), ejecutar `python -m mechchar` y confirmar que la ventana dibuja la grilla y responde a rueda/arrastre; luego `git init` y primer commit
 
 ### [ ] Todo
@@ -101,14 +103,14 @@ Reglas: `ui` depende de `core`, nunca al revés. Las optimizaciones largas corre
 - [ ] Revisar capturas de los tramos aún no vistos del video (~1:00–1:31, ~1:34–1:49, ~2:05–2:14, ~2:25–3:40 salvo el T-Rex ya visto, y ~4:10–5:09): capas sin colisión, generación de soportes, engranajes no circulares y los demás personajes finales. Pendiente de confirmar: las miniaturas de la barra de tiempo hacían pensar en un tigre dientes de sable (Cyber Tiger del paper); las capturas nuevas muestran el cuadrúpedo "EMA" y no el tigre, que sigue sin verse
 
 **M1 — Simulador + visor (paper §3)**
-- [ ] `Component` 2D (x, y, θ) y `Assembly`, con un campo `z` (plano de profundidad) desde el principio, aunque la simulación sea 2D
-- [ ] Conexiones: Pin, Point-On-Line, Phase (engranajes, ratio −r, con un offset de fase φ opcional para el desfase entre mecanismos), Fixed State
-- [ ] Solver de min ½CᵀC con `least_squares` y Jacobiano analítico; luego Newton propio si hace falta
-- [ ] **Continuación por fase:** cada paso arranca desde la solución anterior para seguir la misma rama de ensamblado (evita saltos de configuración del cuadrilátero)
-- [ ] Detección de ciclo completo: rechazar mecanismos que se traban o saltan de rama (condición de Grashof / salto máximo entre fases consecutivas)
-- [ ] Detección sobre/subrestringido (mínimo ≠ 0 / Hessiano singular)
-- [ ] Input Driver con fase t ∈ [0, 1] y animación cíclica en el canvas
-- [ ] Tests: cuadrilátero y manivela-corredera contra soluciones analíticas; test de gradiente
+- [x] `Component` 2D (x, y, θ) y `Assembly`, con un campo `z` (plano de profundidad) desde el principio, aunque la simulación sea 2D
+- [x] Conexiones: Pin, Point-On-Line, Phase (engranajes, ratio −r, con un offset de fase φ opcional para el desfase entre mecanismos), Fixed State
+- [x] Solver de min ½CᵀC con `least_squares` y Jacobiano analítico; luego Newton propio si hace falta
+- [x] **Continuación por fase:** cada paso arranca desde la solución anterior para seguir la misma rama de ensamblado (evita saltos de configuración del cuadrilátero)
+- [x] Detección de ciclo completo: rechazar mecanismos que se traban o saltan de rama (condición de Grashof / salto máximo entre fases consecutivas)
+- [x] Detección sobre/subrestringido (mínimo ≠ 0 / Hessiano singular)
+- [ ] Animación cíclica en el canvas (el Input Driver ya existe como `Drive` en el núcleo)
+- [x] Tests: cuadrilátero y manivela-corredera contra soluciones analíticas; test de gradiente
 
 **M2 — Ajuste de curva sin base de datos (paper §4.2)**
 - [ ] Mecanismos parametrizados: cuadrilátero, 5-bar con 2 engranajes (ratios −2, −1, 1, 2), manivela-corredera
