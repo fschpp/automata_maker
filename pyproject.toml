@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mechchar"
+version = "0.0.1"
+description = "Mechanical Characters Designer (Coros et al., SIGGRAPH 2013) con Python + GTK4"
+requires-python = ">=3.11"
+dependencies = ["numpy", "scipy", "shapely"]
+
+[project.optional-dependencies]
+# PyGObject necesita GTK4 del sistema (apt: python3-gi gir1.2-gtk-4.0 python3-gi-cairo)
+ui = ["PyGObject"]
+layers = ["ortools"]
+export = ["trimesh"]
+dev = ["pytest", "pytest-benchmark", "ruff", "mypy"]
+
+[project.scripts]
+mechchar = "mechchar.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["mechchar*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "N"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+check_untyped_defs = true

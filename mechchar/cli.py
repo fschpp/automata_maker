@@ -1,0 +1,32 @@
+"""Punto de entrada. Sin argumentos abre la GUI; el pipeline sin GUI se agregará aquí."""
+
+from __future__ import annotations
+
+import argparse
+import sys
+
+from mechchar import __version__
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="mechchar")
+    parser.add_argument("--version", action="store_true")
+    args = parser.parse_args(argv)
+    if args.version:
+        print(__version__)
+        return 0
+
+    try:
+        from mechchar.ui.app import run
+    except ImportError:
+        print(
+            "No se pudo importar GTK4/PyGObject. En Debian/Ubuntu:\n"
+            "  sudo apt install python3-gi gir1.2-gtk-4.0 python3-gi-cairo",
+            file=sys.stderr,
+        )
+        return 1
+    return run()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
