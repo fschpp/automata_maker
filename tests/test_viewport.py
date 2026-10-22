@@ -66,3 +66,14 @@ def test_grid_step_adapts_to_zoom():
     vp = Viewport(scale=500.0, ox=0.0, oy=0.0)
     step, _, _ = grid_lines(vp, 800, 600)
     assert step == pytest.approx(0.1)
+
+
+def test_fit_bounds_centers_and_fits_the_rectangle():
+    vp = Viewport()
+    vp.fit_bounds(-2.0, -1.0, 6.0, 3.0, 800, 600, margin_px=50)
+    assert vp.scale == pytest.approx(min(700 / 8.0, 500 / 4.0))
+    sx, sy = vp.world_to_screen(2.0, 1.0)  # el centro del rectángulo cae en el centro de la vista
+    assert (sx, sy) == pytest.approx((400.0, 300.0))
+    for corner in [(-2.0, -1.0), (6.0, 3.0)]:
+        x, y = vp.world_to_screen(*corner)
+        assert 50 - 1e-9 <= x <= 750 + 1e-9 and 50 - 1e-9 <= y <= 550 + 1e-9

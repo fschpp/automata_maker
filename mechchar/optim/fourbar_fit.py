@@ -27,10 +27,12 @@ import numpy as np
 from scipy.optimize import least_squares
 
 from mechchar.core.assembly import Assembly, Drive, FixedState, Pin, drot, world_point
-from mechchar.core.mechanisms import circle_intersections
+from mechchar.core.mechanisms import FourBar, circle_intersections
 from mechchar.optim.curves import bbox_diag, chamfer_rms, resample_closed
 
 N_PARAMS = 10
+# Ningún eslabón ni el marcador puede superar este múltiplo del tamaño de la curva (compacidad).
+MAX_LINK_RATIO = 1.5
 TWO_PI = 2.0 * math.pi
 
 
@@ -76,6 +78,15 @@ def build(p: np.ndarray, branch: int) -> Built | None:
     asm.add(Pin(ro, (0.0, 0.0), g, (d, 0.0)))
     asm.add(Drive(cr, offset=psi))
     return Built(asm, asm.initial_state(), k, (tx, ty))
+
+
+def to_four_bar(p: np.ndarray, branch: int) -> FourBar | None:
+    """El mecanismo de parámetros ``p`` como ``FourBar`` (para animarlo y dibujarlo)."""
+    b = build(p, branch)
+    if b is None:
+        return None
+    _, _, _, _, r, lc, rr, _, _, _ = (float(v) for v in p)
+    return FourBar(b.asm, b.state0, 0, 1, b.coupler, 3, b.tracer, {1: r, b.coupler: lc, 3: rr})
 
 
 def trace_curve(p: np.ndarray, branch: int, n: int) -> np.ndarray | None:
@@ -207,6 +218,13 @@ def _initial_candidates(
         c0 = local.mean(1, keepdims=True)
         diag = np.hypot(np.ptp(local[..., 0], axis=1), np.ptp(local[..., 1], axis=1))
         f = size / diag
+        extent = np.maximum.reduce([np.ones_like(r), r, lc, rr, np.hypot(tx, ty)])
+        compact = f * extent <= MAX_LINK_RATIO * size
+        if not compact.any():
+            continue
+        local, r, lc, rr, tx, ty, br, c0, f = (
+            a[compact] for a in (local, r, lc, rr, tx, ty, br, c0, f)
+        )
         ang_l = _principal_angle(local)
         for flip in (0.0, math.pi):
             phi = ang_y - ang_l + flip
@@ -273,11 +291,27 @@ def distance_residuals(
     return np.concatenate([r_f, r_b]), np.vstack([j_f, j_b]).reshape(-1, n_params)
 
 
+def _compactness(p: np.ndarray, size: float) -> tuple[np.ndarray, np.ndarray]:
+    """Residuos de bisagra que penalizan eslabones o marcador más grandes que el límite."""
+    limit = MAX_LINK_RATIO * size
+    res = np.zeros(5)
+    jac = np.zeros((5, N_PARAMS))
+    for row, idx in enumerate((3, 4, 5, 6)):
+        if p[idx] > limit:
+            res[row] = p[idx] - limit
+            jac[row, idx] = 1.0
+    h = math.hypot(p[7], p[8])
+    if h > limit:
+        res[4] = h - limit
+        jac[4, 7], jac[4, 8] = p[7] / h, p[8] / h
+    return res, jac
+
+
 def _refine(
     p0: np.ndarray, branch: int, y: np.ndarray, y_dense: np.ndarray, n: int, max_nfev: int
 ) -> np.ndarray:
     size = bbox_diag(y)
-    n_res = n + len(y)
+    n_res = n + len(y) + 5
     cache: dict[bytes, tuple[np.ndarray, np.ndarray]] = {}
 
     def evaluate(p: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -288,7 +322,9 @@ def _refine(
             if out is None:  # mecanismo no ensamblable: penalización para rechazar el paso
                 cache[key] = (np.full(n_res, size), np.zeros((n_res, N_PARAMS)))
             else:
-                cache[key] = distance_residuals(out[0], out[1], y, y_dense)
+                r_d, j_d = distance_residuals(out[0], out[1], y, y_dense)
+                r_c, j_c = _compactness(p, size)
+                cache[key] = (np.concatenate([r_d, r_c]), np.vstack([j_d, j_c]))
         return cache[key]
 
     res = least_squares(

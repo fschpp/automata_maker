@@ -10,6 +10,7 @@ from mechchar.optim.curves import (
     resample_closed,
 )
 from mechchar.optim.fourbar_fit import (
+    MAX_LINK_RATIO,
     N_PARAMS,
     _fast_local_curves,
     curve_and_jacobian,
@@ -128,3 +129,12 @@ def test_fit_recovers_exactly_a_curve_made_by_a_four_bar():
     result = fit_four_bar(target, seed=1)
     assert result is not None
     assert result.rms_rel < 0.03
+
+
+def test_fitted_mechanism_is_compact():
+    target = ellipse()
+    result = fit_four_bar(target)
+    assert result is not None
+    p = result.params
+    extent = max(p[3], p[4], p[5], p[6], math.hypot(p[7], p[8]))
+    assert extent <= MAX_LINK_RATIO * bbox_diag(target) * 1.01

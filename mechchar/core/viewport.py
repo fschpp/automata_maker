@@ -37,6 +37,25 @@ class Viewport:
         self.ox = sx - wx * new_scale
         self.oy = sy + wy * new_scale
 
+    def fit_bounds(
+        self,
+        xmin: float,
+        ymin: float,
+        xmax: float,
+        ymax: float,
+        width: float,
+        height: float,
+        margin_px: float = 40.0,
+    ) -> None:
+        """Escala y centra la vista para que el rectángulo de mundo quepa en (width, height)."""
+        w = max(xmax - xmin, 1e-9)
+        h = max(ymax - ymin, 1e-9)
+        avail_w, avail_h = max(width - 2 * margin_px, 1.0), max(height - 2 * margin_px, 1.0)
+        self.scale = min(max(min(avail_w / w, avail_h / h), MIN_SCALE), MAX_SCALE)
+        cx, cy = (xmin + xmax) / 2, (ymin + ymax) / 2
+        self.ox = width / 2 - cx * self.scale
+        self.oy = height / 2 + cy * self.scale
+
     def center_origin(self, width: float, height: float) -> None:
         self.ox, self.oy = width / 2, height / 2
 

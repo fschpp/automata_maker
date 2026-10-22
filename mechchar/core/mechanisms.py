@@ -40,6 +40,19 @@ class FourBar:
     def tracer_world(self, state: np.ndarray) -> np.ndarray:
         return self.asm.world_point(state, self.coupler, self.tracer)
 
+    def joints(self, state: np.ndarray) -> np.ndarray:
+        """Articulaciones (bancada A y D, punta de manivela, extremo del acoplador) y marcador."""
+        w = self.asm.world_point
+        return np.array(
+            [
+                w(state, self.ground, (0.0, 0.0)),
+                w(state, self.rocker, (0.0, 0.0)),
+                w(state, self.crank, (self.lengths[self.crank], 0.0)),
+                w(state, self.coupler, (self.lengths[self.coupler], 0.0)),
+                self.tracer_world(state),
+            ]
+        )
+
 
 def four_bar(
     d: float,
