@@ -35,6 +35,7 @@ class FourBar:
     coupler: int
     rocker: int
     tracer: Vec  # punto trazador, en coordenadas locales del acoplador
+    lengths: dict[int, float]  # largo de cada eslabón móvil (distancia entre sus pines)
 
     def tracer_world(self, state: np.ndarray) -> np.ndarray:
         return self.asm.world_point(state, self.coupler, self.tracer)
@@ -68,7 +69,7 @@ def four_bar(
     asm.add(Pin(k, (l, 0.0), b, (rr, 0.0)))
     asm.add(Pin(b, (0.0, 0.0), g, (d, 0.0)))
     asm.add(Drive(c))
-    return FourBar(asm, asm.initial_state(), g, c, k, b, tracer)
+    return FourBar(asm, asm.initial_state(), g, c, k, b, tracer, {c: r, k: l, b: rr})
 
 
 @dataclass

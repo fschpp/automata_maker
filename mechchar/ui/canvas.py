@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import Any
+
 import gi
 
 gi.require_version("Gtk", "4.0")
@@ -17,6 +20,10 @@ class Canvas(Gtk.DrawingArea):
         super().__init__()
         self.viewport = Viewport()
         self._centered = False
+        # Fracción (x, y) de la ventana donde se coloca el origen al abrir.
+        self.origin_frac = (0.5, 0.5)
+        # Callback opcional ``overlay(cr, viewport)`` que dibuja la escena sobre la grilla.
+        self.overlay: Callable[[Any, Viewport], None] | None = None
         self._pointer = (0.0, 0.0)
         self._drag_start = (0.0, 0.0)
         self.set_hexpand(True)
@@ -59,7 +66,7 @@ class Canvas(Gtk.DrawingArea):
     def _draw(self, _area: Gtk.DrawingArea, cr, width: int, height: int) -> None:
         vp = self.viewport
         if not self._centered:
-            vp.center_origin(width, height)
+            vp.ox, vp.oy = width * self.origin_frac[0], height * self.origin_frac[1]
             self._centered = True
 
         cr.set_source_rgb(0.97, 0.97, 0.97)
@@ -89,3 +96,6 @@ class Canvas(Gtk.DrawingArea):
         cr.move_to(ox, 0)
         cr.line_to(ox, height)
         cr.stroke()
+
+        if self.overlay is not None:
+            self.overlay(cr, vp)
