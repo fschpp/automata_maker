@@ -1,10 +1,10 @@
 # PROGRESS.md — Mechanical Characters Designer (Python + GTK4)
 
 Basado en: Coros et al., *Computational Design of Mechanical Characters* (SIGGRAPH 2013, Disney Research).
-Última actualización: 2026-10-22 · Rama: `main` · Plan: v3.0 · Estado: M0 y M1 hechos (falta confirmar zoom/pan con el mouse); siguiente: M2
+Última actualización: 2026-10-22 · Rama: `main` · Plan: v3.0 · Estado: M0 y M1 hechos (falta confirmar zoom/pan con el mouse); M2 con el núcleo del cuadrilátero hecho, falta la UI de spline y las otras familias de mecanismos
 
 ## Current Focus
-Pasar a M2: mecanismos parametrizados (cuadrilátero, 5-bar con engranajes, manivela-corredera), marcador y curva trazada, objetivo F, gradiente por Teorema de la Función Implícita y BFGS, con la spline editable en el canvas. Objetivo general: llegar lo antes posible al primer "corte vertical" funcional: un cuadrilátero articulado animado en GTK que ajusta una curva dibujada con el mouse (M1 + M2), antes de construir la base de movimientos.
+Completar M2: spline cerrada editable en el canvas con ajuste en vivo, mostrar objetivo vs. curva actual, 5-bar con engranajes y manivela-corredera parametrizados, y la escena de la pierna. Objetivo general: llegar lo antes posible al primer "corte vertical" funcional: un cuadrilátero articulado animado en GTK que ajusta una curva dibujada con el mouse (M1 + M2), antes de construir la base de movimientos. El ajuste ya funciona en el núcleo; falta la parte interactiva.
 
 ## Principios del plan v2
 1. **Cortes verticales, no capas:** cada hito termina en algo que se ve y se prueba en la app. El paper construye la base de movimientos primero; acá la dejamos para M3 como *optimización de velocidad y calidad* de algo que ya funciona.
@@ -93,6 +93,7 @@ Reglas: `ui` depende de `core`, nunca al revés. Las optimizaciones largas corre
 - [x] Plan v3.0: paredes de soporte en L, engranajes en varias capas sobre ejes perpendiculares a la pared, caja como pila de placas, eje de entrada para taladro y nota sobre engranajes no circulares en el galope (2026-10-22)
 - [x] M1 (núcleo sin GTK): `core/assembly.py` (Component con `z`, conexiones FixedState/Pin/PointOnLine/Phase con offset/Drive, Jacobiano analítico, solver con `least_squares`, continuación por fase, detección de ciclo completo y análisis de DOF/redundancia) y `core/mechanisms.py` (cuadrilátero y manivela-corredera con configuración inicial analítica); 26 tests en verde (curva del acoplador vs. solución analítica con error < 1e-6, manivela-corredera analítica, Jacobiano vs. diferencias finitas) (2026-10-22)
 - [x] M1 (UI): cuadrilátero animado en el canvas con la curva del marcador, botón Pausa y deslizador de fase; `Playback` con 6 tests; 32 tests en total, y prueba de humo de la ventana con Xvfb (2026-10-22)
+- [x] M2 (núcleo, solo cuadrilátero): `optim/curves.py` (remuestreo, tamaño, chamfer, correspondencia) y `optim/fourbar_fit.py` (modelo paramétrico, gradiente por función implícita, búsqueda con reinicios y refinamiento). Criterio de aceptación: elipse 0,5 %, frijol 1,7 % y curva de otro cuadrilátero 0,4 % del tamaño de la curva (< 3 %), ~7 s por ajuste; 43 tests en verde (2026-10-22)
 
 ### [/] In Progress
 - [/] M0 — Falta confirmar que el zoom (rueda) y el pan (arrastrar) responden en tu máquina; la ventana, la grilla y los ejes ya se ven (captura 2026-10-22)
@@ -113,14 +114,14 @@ Reglas: `ui` depende de `core`, nunca al revés. Las optimizaciones largas corre
 - [x] Tests: cuadrilátero y manivela-corredera contra soluciones analíticas; test de gradiente
 
 **M2 — Ajuste de curva sin base de datos (paper §4.2)**
-- [ ] Mecanismos parametrizados: cuadrilátero, 5-bar con 2 engranajes (ratios −2, −1, 1, 2), manivela-corredera
-- [ ] Marcador (punto que traza la curva) y curva en un ciclo
-- [ ] Objetivo F = ½∫|x(p,s_t) − x̂_t|² dt discretizado
-- [ ] Gradiente por Teorema de la Función Implícita: ∂s/∂p = −(∂C/∂s)⁻¹ ∂C/∂p (∂C/∂p por diferencias finitas, ∂C/∂s analítico, pseudo-inversa si hay restricciones redundantes)
-- [ ] BFGS con reinicios aleatorios; comparar contra diferencias finitas completas (el paper reporta 20–30× de ganancia)
+- [/] Mecanismos parametrizados: cuadrilátero, 5-bar con 2 engranajes (ratios −2, −1, 1, 2), manivela-corredera — hecho solo el cuadrilátero (10 parámetros: pose de la bancada, 4 largos, marcador y desfase); faltan el 5-bar con engranajes y la manivela-corredera parametrizados
+- [x] Marcador (punto que traza la curva) y curva en un ciclo (cuadrilátero)
+- [x] Objetivo: **cambió respecto del paper/plan.** La correspondencia fija x(p, t_k) = x̂_k deja un piso de error de ~2 % aunque el objetivo sea la curva exacta de un cuadrilátero, porque el marcador no recorre su curva a velocidad uniforme. Se usan distancias punto-a-curva en ambos sentidos (residuo a lo largo de la normal del segmento más cercano), sin correspondencia; ver `optim/fourbar_fit.py`
+- [x] Gradiente por Teorema de la Función Implícita: ∂s/∂p = −(∂C/∂s)⁻¹ ∂C/∂p (∂C/∂p por diferencias finitas, ∂C/∂s analítico, pseudo-inversa si hay restricciones redundantes) — hecho con el simulador genérico; coincide con diferencias finitas con error relativo < 1e-5 (`test_implicit_function_gradient_matches_finite_differences`)
+- [/] Reinicios aleatorios + `least_squares` (trf) con el Jacobiano por función implícita (en vez de BFGS: el objetivo es de mínimos cuadrados). Los candidatos se ordenan con una evaluación analítica vectorizada y alineación por ejes principales; los 2 mejores se refinan. Falta medir la ganancia frente a diferencias finitas completas (el paper reporta 20–30×)
 - [ ] UI: curva cerrada editable como spline con puntos de control arrastrables (como en el video) → ver mecanismo ajustado y animación
 - [ ] Mostrar en vivo la curva objetivo (rojo) y la curva actual (blanco) mientras converge la optimización
-- [ ] Prueba de robustez: partir de un inicial deliberadamente malo y comprobar que converge igual (el video lo muestra)
+- [ ] Prueba de robustez: partir de un inicial deliberadamente malo y comprobar que converge igual (el video lo muestra) — pendiente (hoy el inicial lo elige la búsqueda aleatoria, no el usuario)
 - [ ] **Marcador sobre una pieza del personaje** (Fig. 5 derecha): escena de prueba de una pierna (muslo con pivote fijo, tibia/pie y una varilla pasiva) accionada por un mecanismo de dos engranajes; optimizar para que el pie siga una elipse objetivo partiendo de una curva en forma de ocho, como en el video. Aquí el estado s_t incluye los grados de libertad del personaje
 - [ ] Alternativa a evaluar: autodiff con JAX para ahorrar derivadas a mano
 
