@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Protocol
 
 import gi
 
@@ -13,6 +13,16 @@ from gi.repository import Gtk  # noqa: E402
 from mechchar.core.viewport import Viewport, grid_lines  # noqa: E402
 
 ZOOM_STEP = 1.1
+
+
+class DragTarget(Protocol):
+    """Objeto que puede reclamar un arrastre (p. ej. un punto de control) antes del pan."""
+
+    def drag_begin(self, sx: float, sy: float) -> bool: ...
+
+    def drag_update(self, sx: float, sy: float) -> None: ...
+
+    def drag_end(self) -> None: ...
 
 
 class Canvas(Gtk.DrawingArea):
@@ -26,6 +36,10 @@ class Canvas(Gtk.DrawingArea):
         self.overlay: Callable[[Any, Viewport], None] | None = None
         self._pointer = (0.0, 0.0)
         self._drag_start = (0.0, 0.0)
+        self._press = (0.0, 0.0)
+        self._claimed = False
+        # Si está definido, puede reclamar el arrastre; si no lo reclama, se hace pan.
+        self.drag_target: DragTarget | None = None
         self.set_hexpand(True)
         self.set_vexpand(True)
         self.set_draw_func(self._draw)
@@ -34,6 +48,7 @@ class Canvas(Gtk.DrawingArea):
         drag.set_button(0)  # cualquier botón
         drag.connect("drag-begin", self._on_drag_begin)
         drag.connect("drag-update", self._on_drag_update)
+        drag.connect("drag-end", self._on_drag_end)
         self.add_controller(drag)
 
         scroll = Gtk.EventControllerScroll.new(Gtk.EventControllerScrollFlags.VERTICAL)
@@ -48,12 +63,23 @@ class Canvas(Gtk.DrawingArea):
     def _on_motion(self, _ctrl: Gtk.EventControllerMotion, x: float, y: float) -> None:
         self._pointer = (x, y)
 
-    def _on_drag_begin(self, _g: Gtk.GestureDrag, _x: float, _y: float) -> None:
+    def _on_drag_begin(self, _g: Gtk.GestureDrag, x: float, y: float) -> None:
+        self._press = (x, y)
+        self._claimed = self.drag_target is not None and self.drag_target.drag_begin(x, y)
         self._drag_start = (self.viewport.ox, self.viewport.oy)
 
     def _on_drag_update(self, _g: Gtk.GestureDrag, dx: float, dy: float) -> None:
-        self.viewport.ox = self._drag_start[0] + dx
-        self.viewport.oy = self._drag_start[1] + dy
+        if self._claimed and self.drag_target is not None:
+            self.drag_target.drag_update(self._press[0] + dx, self._press[1] + dy)
+        else:
+            self.viewport.ox = self._drag_start[0] + dx
+            self.viewport.oy = self._drag_start[1] + dy
+        self.queue_draw()
+
+    def _on_drag_end(self, _g: Gtk.GestureDrag, _dx: float, _dy: float) -> None:
+        if self._claimed and self.drag_target is not None:
+            self.drag_target.drag_end()
+        self._claimed = False
         self.queue_draw()
 
     def _on_scroll(self, _c: Gtk.EventControllerScroll, _dx: float, dy: float) -> bool:
