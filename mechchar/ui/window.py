@@ -8,16 +8,25 @@ import numpy as np
 gi.require_version("Gtk", "4.0")
 from gi.repository import GLib, Gtk  # noqa: E402
 
-from mechchar.core.mechanisms import FourBar  # noqa: E402
+from mechchar.core.mechanisms import Mechanism  # noqa: E402
 from mechchar.core.playback import Playback  # noqa: E402
 from mechchar.core.viewport import Viewport  # noqa: E402
-from mechchar.optim.fourbar_fit import FitResult, fit_four_bar, to_four_bar  # noqa: E402
+from mechchar.optim.families import family_by_name, fit_best  # noqa: E402
+from mechchar.optim.fitcore import FitResult, Throttle  # noqa: E402
 from mechchar.optim.job import LatestJobRunner  # noqa: E402
 from mechchar.ui.canvas import Canvas  # noqa: E402
-from mechchar.ui.scene import draw_four_bar, draw_path  # noqa: E402
+from mechchar.ui.scene import draw_mechanism, draw_path, draw_progress_curve  # noqa: E402
 from mechchar.ui.spline_editor import SplineEditor  # noqa: E402
 
 PERIOD_S = 4.0  # segundos por ciclo
+FAMILY_LABELS = {"four_bar": "cuadrilátero", "geared_five_bar": "5-bar con engranajes"}
+
+
+def describe(result: FitResult) -> str:
+    label = FAMILY_LABELS.get(result.family, result.family)
+    if result.variant.ratio:
+        label += f" (relación {result.variant.ratio:+.0f})"
+    return label
 
 
 class MainWindow(Gtk.ApplicationWindow):
@@ -26,7 +35,8 @@ class MainWindow(Gtk.ApplicationWindow):
         self.set_default_size(1000, 700)
 
         # Mecanismo ajustado (None hasta el primer ajuste).
-        self.mech: FourBar | None = None
+        self.mech: Mechanism | None = None
+        self.progress: np.ndarray | None = None  # curva en evaluación mientras se ajusta
         self.path: list[Any] = []
         self.playback: Playback | None = None
         self._last_time: int | None = None
@@ -39,7 +49,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.canvas.drag_target = self.editor
 
         self.runner = LatestJobRunner(
-            lambda target: fit_four_bar(target),
+            lambda target: fit_best(target, on_progress=Throttle(self._post_progress)),
             lambda _item, result, error: GLib.idle_add(self._on_fit_done, result, error),
         )
 
@@ -80,7 +90,9 @@ class MainWindow(Gtk.ApplicationWindow):
         self.editor.draw(cr, vp)
         if self.mech is not None and self.playback is not None:
             draw_path(cr, vp, self.path)
-            draw_four_bar(cr, vp, self.mech, self.playback.state)
+            draw_mechanism(cr, vp, self.mech, self.playback.state)
+        if self.progress is not None:
+            draw_progress_curve(cr, vp, self.progress)
 
     # --- ajuste --------------------------------------------------------
     def _on_fit_clicked(self, _button: Gtk.Button) -> None:
@@ -88,14 +100,33 @@ class MainWindow(Gtk.ApplicationWindow):
             return
         self.fit_button.set_sensitive(False)
         self.status.set_text("Ajustando mecanismo… (unos segundos)")
+        self.progress = None
         self.runner.submit(self.editor.curve(per_segment=24))
+
+    def _post_progress(self, label: str, curve: np.ndarray) -> None:
+        """Llamado desde el hilo de trabajo: pasa la curva en evaluación al hilo principal."""
+        GLib.idle_add(self._on_progress, label, curve.copy())
+
+    def _on_progress(self, label: str, curve: np.ndarray) -> bool:
+        if self.runner.busy:  # ignora avisos que llegan después de terminar
+            self.progress = curve
+            for name, nice in FAMILY_LABELS.items():
+                label = label.replace(name, nice)
+            self.status.set_text(f"Ajustando mecanismo… {label}")
+            self.canvas.queue_draw()
+        return False
 
     def _on_fit_done(self, result: FitResult | None, error: BaseException | None) -> bool:
         self.fit_button.set_sensitive(True)
+        self.progress = None
         if error is not None:
             self.status.set_text(f"Error al ajustar: {error!r}")
             return False
-        fb = to_four_bar(result.params, result.branch) if result is not None else None
+        fb = (
+            family_by_name(result.family).to_mechanism(result.params, result.variant)
+            if result is not None
+            else None
+        )
         if result is None or fb is None:
             self.status.set_text("No se encontró un mecanismo válido para esta curva.")
             return False
@@ -106,15 +137,17 @@ class MainWindow(Gtk.ApplicationWindow):
         self.scale.set_sensitive(True)
         self._last_time = None
         pct = result.rms_rel * 100
-        self.status.set_text(f"Ajuste listo: error {pct:.1f} % del tamaño de la curva.")
+        self.status.set_text(
+            f"Ajuste listo: {describe(result)}, error {pct:.1f} % del tamaño de la curva."
+        )
         self._zoom_to_fit(fb)
         self.canvas.queue_draw()
         return False  # GLib.SOURCE_REMOVE
 
-    def _zoom_to_fit(self, fb: FourBar) -> None:
+    def _zoom_to_fit(self, fb: Mechanism) -> None:
         """Encuadra la spline y el mecanismo en todo su ciclo."""
         cycle = fb.asm.trace_cycle(fb.state0, n_steps=24, max_jump=1.0)
-        pts = [self.editor.curve()] + [fb.joints(s) for s in cycle.states]
+        pts = [self.editor.curve()] + [fb.outline_points(s) for s in cycle.states]
         allp = np.vstack(pts)
         lo, hi = allp.min(axis=0), allp.max(axis=0)
         self.canvas.viewport.fit_bounds(

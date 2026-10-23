@@ -1,4 +1,5 @@
-"""Prueba de humo de la UI sin pantalla: arrastra un punto de control, ajusta un mecanismo y guarda
+"""Prueba de humo de la UI sin pantalla: arrastra un punto de control, ajusta un mecanismo (se
+guarda una captura a mitad del ajuste con la curva en evaluación) y anima el resultado; guarda
 capturas en /tmp/shot_*.png.
 
 Uso (necesita xvfb y GTK4):
@@ -49,8 +50,13 @@ def on_activate(app):
         return False
 
     def poll():
-        if win.runner.busy and time.time() - state["t0"] < 60:
+        if win.runner.busy and time.time() - state["t0"] < 90:
+            if win.progress is not None and not state.get("shot_progress"):
+                state["shot_progress"] = True
+                print("progreso visible:", len(win.progress), "puntos |", win.status.get_text())
+                snap(win, "/tmp/shot_1b_progreso.png")
             return True
+        print("curva de progreso mostrada durante el ajuste:", bool(state.get("shot_progress")))
         print("estado:", win.status.get_text())
         print("mecanismo:", win.mech is not None, "| tiempo de ajuste:", round(time.time() - state["t0"], 1), "s")
         GLib.timeout_add(1200, finish)
