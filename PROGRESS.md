@@ -1,10 +1,10 @@
 # PROGRESS.md — Mechanical Characters Designer (Python + GTK4)
 
 Basado en: Coros et al., *Computational Design of Mechanical Characters* (SIGGRAPH 2013, Disney Research).
-Última actualización: 2026-10-22 · Rama: `main` · Plan: v3.1 · Estado: M0 y M1 hechos (falta confirmar zoom/pan con el mouse); M2 con ajuste interactivo entre dos familias (cuadrilátero y 5-bar con engranajes), convergencia en vivo y prueba de robustez; faltan la manivela-corredera y la escena de la pierna
+Última actualización: 2026-10-22 · Rama: `main` · Plan: v3.1 · Estado: M0 y M1 hechos (falta confirmar zoom/pan con el mouse); M2 con ajuste interactivo entre dos familias (cuadrilátero y 5-bar con engranajes), convergencia en vivo y prueba de robustez; faltan la manivela-corredera y la escena de la pierna. M3 con la métrica, la base de movimientos y la consulta en vivo con 3 candidatos hechas; faltan la caja de engranajes (M4), la galería de miniaturas y el entrenamiento de coeficientes
 
 ## Current Focus
-Terminar M2: falta la manivela-corredera como tercera familia y la escena de la pierna (marcador sobre una pieza del personaje, con el estado del personaje dentro de la simulación). Después, M3 (métrica y base de movimientos) para que el ajuste sea casi instantáneo. Objetivo general: llegar lo antes posible al primer "corte vertical" funcional: un cuadrilátero articulado animado en GTK que ajusta una curva dibujada con el mouse (M1 + M2). Ya existe para el cuadrilátero y el 5-bar con engranajes (el ajuste elige entre ambos).
+Cerrar lo que queda de M2 (manivela-corredera como tercera familia y la escena de la pierna, con el estado del personaje dentro de la simulación) o pasar a M4 (personaje articulado, caja de engranajes y desfases), que es lo que hace útil el resultado de M3: hoy los candidatos no pueden descartarse por no caber en una caja de engranajes porque esa caja todavía no existe. Objetivo general: llegar lo antes posible al primer "corte vertical" funcional: una curva dibujada con el mouse que se ajusta a un mecanismo animado (M1 + M2 + M3). Ya existe con el cuadrilátero y el 5-bar con engranajes, con candidatos instantáneos de la base.
 
 ## Principios del plan v2
 1. **Cortes verticales, no capas:** cada hito termina en algo que se ve y se prueba en la app. El paper construye la base de movimientos primero; acá la dejamos para M3 como *optimización de velocidad y calidad* de algo que ya funciona.
@@ -98,6 +98,9 @@ Reglas: `ui` depende de `core`, nunca al revés. Las optimizaciones largas corre
 - [x] M2 (familias): el ajuste se generalizó a un protocolo `Family` (`optim/fitcore.py`: gradiente por función implícita, objetivo sin correspondencia, refinamiento, búsqueda y `refine_from`), con el cuadrilátero rehecho como familia (mismos resultados) y el **5-bar con dos engranajes** como segunda (`core/mechanisms.py::geared_five_bar`, `optim/fivebar_fit.py`; 12 parámetros, relación ±1/±2 como variante discreta, radios de los engranajes derivados de la relación, manivelas dentro de su engranaje). `optim/families.py::fit_best` ajusta ambas y se queda con la de menor error: elipse 0,37 % y frijol 0,43 % (el cuadrilátero solo daba 1,7 % en el frijol), ~10 s en total (2026-10-22)
 - [x] M2 (convergencia en vivo y robustez): el ajuste informa la curva en evaluación (`on_progress`, limitado a ~7 por segundo) y la UI la dibuja en naranja sobre la spline objetivo; `refine_from` + test que parte de un inicial con más de 10 % de error y converge a < 3 % (cuadrilátero y 5-bar) (2026-10-22)
 - [x] M2 (rendimiento): `world_point` sin matrices y Newton propio en `Assembly.solve` bajaron ~3,4× el costo de curva + Jacobiano (307 → 91 ms con n = 48); `scripts/bench_gradient.py` compara con diferencias finitas completas: implícita 7–11× más rápida, error relativo < 1e-8; 74 tests en verde (2026-10-22)
+- [x] M3 (núcleo): `db/metric.py` (normalización, features, distancia por FFT con rotación y desfase óptimos, Fréchet de referencia), `db/motion_db.py` (muestreo, Poisson-disk, KD-tree, consulta, `suggest`) y `Family.sample_local`/`assemble` en el protocolo; `fit(candidate_source=...)`. 104 tests en verde (2026-10-23)
+- [x] M3 (medición, `scripts/bench_motion_db.py`, base de 3000 entradas del cuadrilátero, 1 núcleo): consulta top-3 de **2,8 ms** de media (objetivo < 100 ms). Top-1 antes de refinar sobre 30 curvas sintéticas tipo "a mano": métrica propia **1,76 %** de media (mediana 1,35 %), Fréchet **1,94 %** (mediana 1,52 %), mejor posible entre las candidatas 1,72 %; la métrica propia es mejor que Fréchet en el 70 % de las curvas. Ojo: son curvas generadas por mí (formas conocidas con ondulaciones), no dibujos reales, y Fréchet ordena las mismas 60 candidatas preseleccionadas, no toda la base
+- [x] M3 (UI): la ventana carga las bases en segundo plano (la primera vez las construye, ~30 s con un núcleo), consulta mientras se arrastra, muestra los 3 mejores candidatos de cualquier familia y refina el elegido; `scripts/smoke_ui.py` lo prueba con Xvfb (2026-10-23)
 
 ### [/] In Progress
 - [/] M0 — Falta confirmar que el zoom (rueda) y el pan (arrastrar) responden en tu máquina; la ventana, la grilla y los ejes ya se ven (captura 2026-10-22)
@@ -131,17 +134,17 @@ Reglas: `ui` depende de `core`, nunca al revés. Las optimizaciones largas corre
 - [ ] Alternativa a evaluar: autodiff con JAX para ahorrar derivadas a mano
 
 **M3 — Métrica y base de movimientos (paper §4.1, §5)**
-- [ ] Remuestreo uniforme, normalización (ancla al origen, PCA, escala 1/l_max)
-- [ ] Features f1..f6 (longitud, área, elipticidad, posición relativa, orientación, autointersecciones)
-- [ ] d_pos y d_angle con desplazamiento del índice de inicio, **calculados por correlación cruzada con FFT** (O(n log n) en vez de O(n²))
-- [ ] Decisión de diseño: la curva dibujada puede ir en sentido horario o antihorario → consultar también la versión invertida
-- [ ] Baseline: Fréchet discreto, para comparar como en la Fig. 9
-- [ ] Muestreo recursivo estilo Poisson-disk en espacio métrico, **descartando configuraciones infactibles** (que no completan el ciclo, según M1)
-- [ ] Base de ≈ 3000 muestras por tipo; precómputo con `multiprocessing`; índice KD-tree sobre features para preseleccionar y luego refinar con la métrica completa
-- [ ] Consulta: curva → mejor mecanismo + transformación (escala, rotación, traslación); descartar los que no caben en la caja de engranajes
-- [ ] Consulta en vivo mientras se arrastran los puntos de control de la spline, con varias curvas a la vez; superponer la curva del mecanismo encontrado sobre la objetivo
-- [ ] Galería de miniaturas de la base para depurar el muestreo
-- [ ] Mostrar los 3 mejores candidatos en colores (rojo, verde, azul) con su caja delimitadora y dejar elegir uno, como en el video; los que no caben en la caja de engranajes se descartan
+- [x] Remuestreo uniforme, normalización (ancla al origen, PCA, escala 1/l_max) — **cambió:** se normaliza por el radio RMS (no por l_max) y no se alinea por PCA, que es inestable en curvas casi circulares; la rotación óptima sale de la propia métrica (`db/metric.py`)
+- [x] Features f1..f6 (longitud, área, elipticidad, posición relativa, orientación, autointersecciones) — las 6 son invariantes a rotación, traslación y escala: perímetro, área, elipticidad, asimetría sobre cada eje principal y autointersecciones. Se descartó "orientación" porque la rotación es libre
+- [x] d_pos y d_angle con desplazamiento del índice de inicio, **calculados por correlación cruzada con FFT** (O(n log n) en vez de O(n²)) — D²(s) = 2(1+λ) − 2·|C[s]|/N con C = correlación de posiciones + λ·correlación de tangentes unitarias, que da a la vez el desfase y la rotación óptimos (λ = 0,5, coeficientes fijos); verificado contra fuerza bruta
+- [x] Decisión de diseño: la curva dibujada puede ir en sentido horario o antihorario → consultar también la versión invertida — la métrica prueba los dos sentidos
+- [x] Baseline: Fréchet discreto, para comparar como en la Fig. 9 — alineado por PCA, 2 signos, 2 sentidos y todos los inicios, con el DP vectorizado; ~415 ms por consulta sobre 60 candidatas
+- [x] Muestreo recursivo estilo Poisson-disk en espacio métrico, **descartando configuraciones infactibles** (que no completan el ciclo, según M1) — **cambió:** Poisson-disk voraz con bisección del radio, medido en el espacio del *descriptor* (features + armónicos de Fourier) y no con la métrica completa; descarta lo que no completa el ciclo (`Family.sample_local`)
+- [x] Base de ≈ 3000 muestras por tipo; precómputo con `multiprocessing`; índice KD-tree sobre features para preseleccionar y luego refinar con la métrica completa — 3000 entradas por familia, 13 s en un núcleo (las bases se guardan en `~/.cache/mechchar/`; `python -m mechchar.db` las precalcula con todos los núcleos); KD-tree sobre el descriptor y métrica completa para ordenar
+- [/] Consulta: curva → mejor mecanismo + transformación (escala, rotación, traslación); descartar los que no caben en la caja de engranajes — hecho: devuelve la transformación (escala, rotación, origen) y se verificó armando el mecanismo real; **falta** descartar por caja de engranajes, que no existe hasta M4. Hoy se descartan los eslabones mayores que 1,5 veces el tamaño de la curva
+- [/] Consulta en vivo mientras se arrastran los puntos de control de la spline, con varias curvas a la vez; superponer la curva del mecanismo encontrado sobre la objetivo — hecho: la consulta corre en un hilo y se actualiza al arrastrar; **falta** hacer varias consultas a la vez
+- [ ] Galería de miniaturas de la base para depurar el muestreo — pendiente
+- [/] Mostrar los 3 mejores candidatos en colores (rojo, verde, azul) con su caja delimitadora y dejar elegir uno, como en el video; los que no caben en la caja de engranajes se descartan — hecho: curvas en rojo/verde/azul numeradas, botones de color y refinamiento del elegido; **falta** la caja delimitadora (depende de la caja de engranajes de M4)
 - [ ] (Post-MVP) Entrenamiento de coeficientes con SLSQP + UI de pares similares/distintos
 
 **M4 — Personaje y múltiples mecanismos**
@@ -236,6 +239,8 @@ Personaje 2D → dibujar 1–3 curvas → mecanismo optimizado por curva → un 
 Fuera del MVP: entrenamiento de la métrica, engranajes no circulares, movimiento 3D.
 
 ## Latest Blockers / Discoveries
+- M3 / aceleración del ajuste: el criterio "la convergencia de M2 más rápida con el inicial de la base" casi no se cumple, porque tras optimizar el solver el refinamiento domina: ajuste completo 1,7 s con base contra 2,3 s con búsqueda aleatoria, y en la elipse la base dio 0,64 % contra 0,44 % (otro óptimo local). El valor de la base es el candidato *instantáneo* (2,8 ms, ~1,8 % de error), no ahorrar tiempo de refinamiento.
+- M3 / piso de la métrica: el 12 % de las entradas de la base están a más de 0,03 de su propia copia rotada y remuestreada (máximo 0,17) con el término de tangentes; las curvas de acoplador tienen cúspides (el giro máximo entre segmentos de 64 puntos tiene mediana de 1,5 rad) y ahí la tangente cambia mucho al remuestrear. Sin ese término el máximo baja a 0,04. Alternativas si molesta: tangentes con una ventana más ancha o menos peso a λ.
 - El 5-bar con engranajes ajusta mejor que el cuadrilátero en el frijol (0,43 % vs 1,7 %) y empata en la elipse; con las dos familias el ajuste tarda ~10 s (antes 7 s con una). Para bajarlo: paralelizar familias en procesos o llegar a la base de movimientos de M3.
 - Resuelto: tras sumar la segunda familia el ajuste en la UI pasó de 7 s a 23 s; el cuello de botella eran las resoluciones con `least_squares` en cada fase de cada evaluación. Con Newton propio y `world_point` sin matrices bajó a ~10 s.
 - La relación de engranajes es una variante discreta (±1, ±2) y no un parámetro continuo, así que el período de la curva siempre coincide con el del Input Driver. En la UI los engranajes se dibujan como discos (los dientes llegan con M5).
