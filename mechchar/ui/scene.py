@@ -118,6 +118,27 @@ def draw_mechanism(cr: Any, vp: Viewport, mech: Mechanism, state: np.ndarray) ->
         draw_four_bar(cr, vp, mech, state)
 
 
+CANDIDATE_COLORS = ((0.84, 0.15, 0.16), (0.17, 0.63, 0.17), (0.12, 0.47, 0.71))  # rojo, verde, azul
+
+
+def draw_candidates(cr: Any, vp: Viewport, curves: list[np.ndarray]) -> None:
+    """Curvas de los candidatos de la base (0 rojo, 1 verde, 2 azul), con su número."""
+    for idx, curve in enumerate(curves[: len(CANDIDATE_COLORS)]):
+        color = CANDIDATE_COLORS[idx]
+        cr.set_source_rgba(*color, 0.9)
+        cr.set_line_width(2.0)
+        cr.move_to(*_screen(vp, curve[0]))
+        for p in curve[1:]:
+            cr.line_to(*_screen(vp, p))
+        cr.close_path()
+        cr.stroke()
+        top = curve[np.argmax(curve[:, 1])]  # etiqueta sobre el punto más alto de la curva
+        x, y = _screen(vp, top)
+        cr.set_font_size(15.0)
+        cr.move_to(x + 6, y - 6)
+        cr.show_text(str(idx))
+
+
 def draw_progress_curve(cr: Any, vp: Viewport, curve: np.ndarray) -> None:
     """Curva que se está evaluando durante el ajuste (la curva blanca del video)."""
     if len(curve) < 2:

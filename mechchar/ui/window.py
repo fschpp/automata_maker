@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 import gi
@@ -11,11 +12,24 @@ from gi.repository import GLib, Gtk  # noqa: E402
 from mechchar.core.mechanisms import Mechanism  # noqa: E402
 from mechchar.core.playback import Playback  # noqa: E402
 from mechchar.core.viewport import Viewport  # noqa: E402
-from mechchar.optim.families import family_by_name, fit_best  # noqa: E402
-from mechchar.optim.fitcore import FitResult, Throttle  # noqa: E402
+from mechchar.db.motion_db import (  # noqa: E402
+    MotionDB,
+    Suggestion,
+    load_or_build,
+    make_candidate_source,
+    suggest,
+)
+from mechchar.optim.families import ALL_FAMILIES, family_by_name, fit_best  # noqa: E402
+from mechchar.optim.fitcore import FitResult, Throttle, refine_from  # noqa: E402
 from mechchar.optim.job import LatestJobRunner  # noqa: E402
 from mechchar.ui.canvas import Canvas  # noqa: E402
-from mechchar.ui.scene import draw_mechanism, draw_path, draw_progress_curve  # noqa: E402
+from mechchar.ui.scene import (  # noqa: E402
+    CANDIDATE_COLORS,
+    draw_candidates,
+    draw_mechanism,
+    draw_path,
+    draw_progress_curve,
+)
 from mechchar.ui.spline_editor import SplineEditor  # noqa: E402
 
 PERIOD_S = 4.0  # segundos por ciclo
@@ -29,8 +43,22 @@ def describe(result: FitResult) -> str:
     return label
 
 
+COLOR_NAMES = ("rojo", "verde", "azul")
+
+
+def describe_suggestion(s: Suggestion) -> str:
+    label = FAMILY_LABELS.get(s.family, s.family)
+    if s.variant.ratio:
+        label += f" (relación {s.variant.ratio:+.0f})"
+    return label
+
+
+def _hex(color: tuple[float, float, float]) -> str:
+    return "#" + "".join(f"{round(c * 255):02x}" for c in color)
+
+
 class MainWindow(Gtk.ApplicationWindow):
-    def __init__(self, app: Gtk.Application) -> None:
+    def __init__(self, app: Gtk.Application, dbs: list[MotionDB] | None = None) -> None:
         super().__init__(application=app, title="Mechanical Characters Designer")
         self.set_default_size(1000, 700)
 
@@ -41,6 +69,8 @@ class MainWindow(Gtk.ApplicationWindow):
         self.playback: Playback | None = None
         self._last_time: int | None = None
         self._updating_scale = False
+        self.dbs: list[MotionDB] = list(dbs) if dbs else []  # una base por familia
+        self.suggestions: list[Suggestion] = []  # los mejores candidatos de la base
 
         self.canvas = Canvas()
         self.canvas.overlay = self._draw_scene
@@ -49,12 +79,26 @@ class MainWindow(Gtk.ApplicationWindow):
         self.canvas.drag_target = self.editor
 
         self.runner = LatestJobRunner(
-            lambda target: fit_best(target, on_progress=Throttle(self._post_progress)),
+            self._fit_work,
             lambda _item, result, error: GLib.idle_add(self._on_fit_done, result, error),
+        )
+        # Consulta a la base mientras se arrastra: solo importa el último pedido.
+        self.query_runner = LatestJobRunner(
+            lambda target: suggest(self.dbs, target),
+            lambda _item, result, error: GLib.idle_add(self._on_suggestions, result, error),
         )
 
         self.fit_button = Gtk.Button(label="Ajustar mecanismo")
         self.fit_button.connect("clicked", self._on_fit_clicked)
+        self.candidate_buttons: list[Gtk.Button] = []
+        for i, color in enumerate(CANDIDATE_COLORS):
+            button = Gtk.Button()
+            dot = Gtk.Label()
+            dot.set_markup(f'<span foreground="{_hex(color)}" size="large">●</span> {i}')
+            button.set_child(dot)
+            button.set_sensitive(False)
+            button.connect("clicked", self._on_candidate_clicked, i)
+            self.candidate_buttons.append(button)
         self.play_button = Gtk.Button(label="Pausa")
         self.play_button.connect("clicked", self._on_play_clicked)
         self.play_button.set_sensitive(False)
@@ -69,7 +113,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.status.set_xalign(0.0)
 
         controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        for widget in (self.fit_button, self.play_button):
+        for widget in (self.fit_button, *self.candidate_buttons, self.play_button):
             controls.append(widget)
         controls.append(self.scale)
         for margin in ("start", "end", "top", "bottom"):
@@ -85,9 +129,63 @@ class MainWindow(Gtk.ApplicationWindow):
 
         self.add_tick_callback(self._on_tick)
 
+        if self.dbs:
+            GLib.idle_add(self._request_suggestions)
+        else:
+            self.status.set_text("Preparando la base de movimientos (solo la primera vez)…")
+            threading.Thread(target=self._load_dbs, daemon=True).start()
+
+    # --- base de movimientos -------------------------------------------
+    def _load_dbs(self) -> None:
+        """Hilo de trabajo: carga las bases del caché o las construye si faltan."""
+        try:
+            dbs = [load_or_build(fam.name, workers=1) for fam in ALL_FAMILIES]
+        except Exception as exc:  # no impedir el uso de la app si falla la base
+            GLib.idle_add(self.status.set_text, f"No se pudo preparar la base: {exc!r}")
+            return
+        GLib.idle_add(self._on_dbs_ready, dbs)
+
+    def _on_dbs_ready(self, dbs: list[MotionDB]) -> bool:
+        self.dbs = dbs
+        self._request_suggestions()
+        return False
+
+    def _request_suggestions(self) -> bool:
+        if self.dbs:
+            self.query_runner.submit(self.editor.curve(per_segment=24))
+        return False
+
+    def _on_suggestions(self, result: list[Suggestion] | None, error: BaseException | None) -> bool:
+        if error is not None or result is None:
+            return False
+        self.suggestions = result
+        for i, button in enumerate(self.candidate_buttons):
+            if i < len(result):
+                s = result[i]
+                button.set_sensitive(not self.runner.busy)
+                tip = f"{describe_suggestion(s)}, error {s.rel_error * 100:.1f} %"
+                button.set_tooltip_text(tip)
+            else:
+                button.set_sensitive(False)
+        if result and not self.runner.busy:
+            parts = [
+                f"{i} {COLOR_NAMES[i]}: {describe_suggestion(s)} ({s.rel_error * 100:.1f} %)"
+                for i, s in enumerate(result)
+            ]
+            self.status.set_text("Candidatos de la base · " + " · ".join(parts))
+        self.canvas.queue_draw()
+        return False
+
+    def _on_candidate_clicked(self, _button: Gtk.Button, index: int) -> None:
+        if self.runner.busy or index >= len(self.suggestions):
+            return
+        self._start_fit(self.suggestions[index])
+
     # --- dibujo --------------------------------------------------------
     def _draw_scene(self, cr: Any, vp: Viewport) -> None:
         self.editor.draw(cr, vp)
+        if self.suggestions and self.progress is None:
+            draw_candidates(cr, vp, [s.curve for s in self.suggestions])
         if self.mech is not None and self.playback is not None:
             draw_path(cr, vp, self.path)
             draw_mechanism(cr, vp, self.mech, self.playback.state)
@@ -95,13 +193,30 @@ class MainWindow(Gtk.ApplicationWindow):
             draw_progress_curve(cr, vp, self.progress)
 
     # --- ajuste --------------------------------------------------------
+    def _fit_work(self, item: tuple[np.ndarray, Suggestion | None]) -> FitResult | None:
+        """Hilo de trabajo: ajuste completo, o refinamiento del candidato elegido."""
+        target, chosen = item
+        progress = Throttle(self._post_progress)
+        if chosen is not None:
+            return refine_from(
+                family_by_name(chosen.family), chosen.p0, chosen.variant, target,
+                on_progress=progress,
+            )
+        source = make_candidate_source(self.dbs) if self.dbs else None
+        return fit_best(target, on_progress=progress, candidate_source=source)
+
     def _on_fit_clicked(self, _button: Gtk.Button) -> None:
-        if self.runner.busy:
-            return
+        if not self.runner.busy:
+            self._start_fit(None)
+
+    def _start_fit(self, chosen: Suggestion | None) -> None:
         self.fit_button.set_sensitive(False)
-        self.status.set_text("Ajustando mecanismo… (unos segundos)")
+        for button in self.candidate_buttons:
+            button.set_sensitive(False)
+        what = "candidato elegido" if chosen is not None else "mecanismo"
+        self.status.set_text(f"Ajustando {what}… (unos segundos)")
         self.progress = None
-        self.runner.submit(self.editor.curve(per_segment=24))
+        self.runner.submit((self.editor.curve(per_segment=24), chosen))
 
     def _post_progress(self, label: str, curve: np.ndarray) -> None:
         """Llamado desde el hilo de trabajo: pasa la curva en evaluación al hilo principal."""
@@ -119,6 +234,8 @@ class MainWindow(Gtk.ApplicationWindow):
     def _on_fit_done(self, result: FitResult | None, error: BaseException | None) -> bool:
         self.fit_button.set_sensitive(True)
         self.progress = None
+        for i, button in enumerate(self.candidate_buttons):
+            button.set_sensitive(i < len(self.suggestions))
         if error is not None:
             self.status.set_text(f"Error al ajustar: {error!r}")
             return False
@@ -131,6 +248,9 @@ class MainWindow(Gtk.ApplicationWindow):
             self.status.set_text("No se encontró un mecanismo válido para esta curva.")
             return False
         self.mech, self.path = fb, list(result.curve)
+        self.suggestions = []  # ya se eligió: se despeja el lienzo hasta la próxima edición
+        for button in self.candidate_buttons:
+            button.set_sensitive(False)
         self.playback = Playback(fb.asm, fb.state0, period=PERIOD_S)
         self.play_button.set_sensitive(True)
         self.play_button.set_label("Pausa")
@@ -155,7 +275,9 @@ class MainWindow(Gtk.ApplicationWindow):
         )
 
     def _on_spline_changed(self) -> None:
-        if self.mech is not None:
+        if self.dbs and not self.runner.busy:
+            self.query_runner.submit(self.editor.curve(per_segment=24))
+        elif self.mech is not None:
             self.status.set_text("Curva modificada: presioná «Ajustar» para recalcular.")
 
     # --- animación -----------------------------------------------------
