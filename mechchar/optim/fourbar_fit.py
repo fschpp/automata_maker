@@ -1,4 +1,4 @@
-"""Ajuste de un cuadrilátero articulado a una curva cerrada objetivo (M2).
+"""Familia «cuadrilátero articulado» para el ajuste a una curva cerrada objetivo (M2).
 
 Parámetros p = (ax, ay, phi, d, r, lc, rr, tx, ty, psi):
   (ax, ay, phi)  pose de la bancada en el mundo (pivote de la manivela y ángulo de la bancada)
@@ -6,42 +6,42 @@ Parámetros p = (ax, ay, phi, d, r, lc, rr, tx, ty, psi):
   (tx, ty)       marcador, en coordenadas locales del acoplador
   psi            ángulo de la manivela (mundo) en t = 0, es decir el desfase del ciclo
 
-Etapas: (1) los candidatos se generan al azar y se ordenan con una evaluación analítica vectorizada
-(solo para elegir puntos de partida); (2) los mejores se refinan con el simulador genérico de
-``core.assembly`` con el gradiente por el Teorema de la Función Implícita:
-∂s/∂p = −(∂C/∂s)⁺ ∂C/∂p, con ∂C/∂s analítico y ∂C/∂p por diferencias finitas.
-
-El objetivo no usa correspondencia punto a punto: el marcador no recorre su curva a velocidad
-uniforme, así que exigir x(p, k/n) = x̂_k deja un error que ningún optimizador puede bajar (el
-paper también descarta el timing en la métrica). Se minimizan distancias punto-a-curva en los dos
-sentidos (mecanismo → objetivo y objetivo → mecanismo), con residuo escalar a lo largo de la
-normal del segmento más cercano, lo que deja libre el deslizamiento tangencial.
+El gradiente, el refinamiento y la búsqueda son comunes a todas las familias (``fitcore``). Los
+candidatos se generan al azar y se ordenan con una evaluación analítica vectorizada, solo para
+elegir puntos de partida.
 """
 
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
 
 import numpy as np
-from scipy.optimize import least_squares
 
-from mechchar.core.assembly import Assembly, Drive, FixedState, Pin, drot, world_point
+from mechchar.core.assembly import Assembly, Drive, FixedState, Pin
 from mechchar.core.mechanisms import FourBar, circle_intersections
-from mechchar.optim.curves import bbox_diag, chamfer_rms, resample_closed
+from mechchar.optim.fitcore import (
+    MAX_LINK_RATIO,
+    Built,
+    Candidate,
+    FitResult,
+    ProgressFn,
+    Variant,
+    curve_and_jacobian_generic,
+    distance_residuals,
+    fit,
+    principal_angle,
+    rank_aligned,
+    trace_curve_generic,
+)
+
+__all__ = [
+    "MAX_LINK_RATIO", "N_PARAMS", "FOUR_BAR", "Built", "FitResult", "FourBarFamily",
+    "build", "curve_and_jacobian", "distance_residuals", "fit_four_bar", "to_four_bar",
+    "trace_curve",
+]
 
 N_PARAMS = 10
-# Ningún eslabón ni el marcador puede superar este múltiplo del tamaño de la curva (compacidad).
-MAX_LINK_RATIO = 1.5
 TWO_PI = 2.0 * math.pi
-
-
-@dataclass
-class Built:
-    asm: Assembly
-    state0: np.ndarray
-    coupler: int
-    tracer: tuple[float, float]
 
 
 def build(p: np.ndarray, branch: int) -> Built | None:
@@ -91,61 +91,14 @@ def to_four_bar(p: np.ndarray, branch: int) -> FourBar | None:
 
 def trace_curve(p: np.ndarray, branch: int, n: int) -> np.ndarray | None:
     """Curva del marcador en n fases t = k/n, o None si el mecanismo no completa el ciclo."""
-    b = build(p, branch)
-    if b is None:
-        return None
-    res = b.asm.trace_cycle(b.state0, n_steps=n, max_jump=1.0)
-    if not res.ok:
-        return None
-    return np.array([world_point(s, b.coupler, b.tracer) for s in res.states])
+    return trace_curve_generic(lambda q: build(q, branch), p, n)
 
 
 def curve_and_jacobian(
     p: np.ndarray, branch: int, n: int
 ) -> tuple[np.ndarray, np.ndarray] | None:
     """Curva x(p) (n, 2) y su Jacobiano dx/dp (n, 2, N_PARAMS), por función implícita."""
-    base = build(p, branch)
-    if base is None:
-        return None
-    res = base.asm.trace_cycle(base.state0, n_steps=n, max_jump=1.0)
-    if not res.ok:
-        return None
-
-    steps = 1e-6 * (1.0 + np.abs(p))
-    plus: list[Built] = []
-    minus: list[Built] = []
-    for j in range(N_PARAMS):
-        pp, pm = p.copy(), p.copy()
-        pp[j] += steps[j]
-        pm[j] -= steps[j]
-        bp, bm = build(pp, branch), build(pm, branch)
-        if bp is None or bm is None:
-            return None
-        plus.append(bp)
-        minus.append(bm)
-
-    x = np.zeros((n, 2))
-    dx = np.zeros((n, 2, N_PARAMS))
-    i = 3 * base.coupler
-    for k in range(n):
-        t, s = k / n, res.states[k]
-        jac_s = base.asm.jacobian(s, t)
-        c_p = np.empty((jac_s.shape[0], N_PARAMS))
-        e_p = np.empty((2, N_PARAMS))
-        for j in range(N_PARAMS):
-            c_p[:, j] = (plus[j].asm.residual(s, t) - minus[j].asm.residual(s, t)) / (2 * steps[j])
-            e_p[:, j] = (
-                world_point(s, base.coupler, plus[j].tracer)
-                - world_point(s, base.coupler, minus[j].tracer)
-            ) / (2 * steps[j])
-        ds_dp = -np.linalg.lstsq(jac_s, c_p, rcond=None)[0]
-        e_s = np.zeros((2, jac_s.shape[1]))
-        e_s[0, i] = 1.0
-        e_s[1, i + 1] = 1.0
-        e_s[:, i + 2] = drot(s[i + 2]) @ np.asarray(base.tracer)
-        x[k] = world_point(s, base.coupler, base.tracer)
-        dx[k] = e_s @ ds_dp + e_p
-    return x, dx
+    return curve_and_jacobian_generic(lambda q: build(q, branch), p, n)
 
 
 # --- evaluación analítica vectorizada (solo para elegir candidatos) -----------------------------
@@ -177,118 +130,7 @@ def _fast_local_curves(
     return np.stack([qx, qy], axis=-1), valid
 
 
-def _principal_angle(curves: np.ndarray) -> np.ndarray:
-    """Ángulo del eje principal de cada curva (K, n, 2) -> (K,)."""
-    d = curves - curves.mean(1, keepdims=True)
-    cxx, cyy = (d[..., 0] ** 2).sum(1), (d[..., 1] ** 2).sum(1)
-    cxy = (d[..., 0] * d[..., 1]).sum(1)
-    return 0.5 * np.arctan2(2.0 * cxy, cxx - cyy)
-
-
-@dataclass
-class FitResult:
-    params: np.ndarray
-    branch: int
-    rms: float  # distancia chamfer RMS entre la curva final y el objetivo
-    rms_rel: float  # rms / diagonal de la caja del objetivo
-    curve: np.ndarray  # curva final, densa (n_dense, 2)
-    initial_rms_rel: float  # error del mejor candidato antes del refinamiento continuo
-
-
-def _initial_candidates(
-    y: np.ndarray, n: int, n_candidates: int, n_keep: int, rng: np.random.Generator
-) -> list[tuple[np.ndarray, int, float]]:
-    """Mejores candidatos aleatorios: (p0, branch, error relativo)."""
-    center, size = y.mean(0), bbox_diag(y)
-    ang_y = float(_principal_angle(y[None])[0])
-    pool: list[tuple[float, np.ndarray, int, np.ndarray]] = []
-    chunk = 4000
-    for _ in range(max(1, n_candidates // chunk)):
-        r = rng.uniform(0.1, 1.0, chunk)
-        lc = rng.uniform(0.6, 3.0, chunk)
-        rr = rng.uniform(0.6, 3.0, chunk)
-        tx = lc * rng.uniform(-0.5, 1.5, chunk)
-        ty = lc * rng.uniform(-1.0, 1.0, chunk)
-        br = rng.choice([-1, 1], chunk)
-        local, valid = _fast_local_curves(r, lc, rr, tx, ty, br.astype(float), n)
-        keep = np.where(valid)[0]
-        if keep.size == 0:
-            continue
-        local, r, lc, rr, tx, ty, br = (a[keep] for a in (local, r, lc, rr, tx, ty, br))
-        c0 = local.mean(1, keepdims=True)
-        diag = np.hypot(np.ptp(local[..., 0], axis=1), np.ptp(local[..., 1], axis=1))
-        f = size / diag
-        extent = np.maximum.reduce([np.ones_like(r), r, lc, rr, np.hypot(tx, ty)])
-        compact = f * extent <= MAX_LINK_RATIO * size
-        if not compact.any():
-            continue
-        local, r, lc, rr, tx, ty, br, c0, f = (
-            a[compact] for a in (local, r, lc, rr, tx, ty, br, c0, f)
-        )
-        ang_l = _principal_angle(local)
-        for flip in (0.0, math.pi):
-            phi = ang_y - ang_l + flip
-            cph, sph = np.cos(phi)[:, None], np.sin(phi)[:, None]
-            dxy = (local - c0) * f[:, None, None]
-            pts = np.stack(
-                [cph * dxy[..., 0] - sph * dxy[..., 1], sph * dxy[..., 0] + cph * dxy[..., 1]],
-                axis=-1,
-            ) + center
-            d2 = ((pts[:, :, None, :] - y[None, None, :, :]) ** 2).sum(-1)
-            cost = np.sqrt(0.5 * (d2.min(2).mean(1) + d2.min(1).mean(1)))
-            for idx in np.argsort(cost)[:n_keep]:
-                fc = f[idx] * c0[idx, 0]  # centroide local escalado
-                c_, s_ = cph[idx, 0], sph[idx, 0]
-                a_world = center - np.array([c_ * fc[0] - s_ * fc[1], s_ * fc[0] + c_ * fc[1]])
-                p0 = np.array(
-                    [a_world[0], a_world[1], phi[idx], f[idx], f[idx] * r[idx], f[idx] * lc[idx],
-                     f[idx] * rr[idx], f[idx] * tx[idx], f[idx] * ty[idx], phi[idx]]
-                )
-                pool.append((float(cost[idx]), p0, int(br[idx]), pts[idx]))
-    pool.sort(key=lambda item: item[0])
-    return [(p0, br, cost / size) for cost, p0, br, _ in pool[:n_keep]]
-
-
-def _closest_on_polyline(
-    q: np.ndarray, v: np.ndarray
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Segmento más cercano de la poligonal cerrada ``v`` (M, 2) para cada punto de ``q`` (m, 2).
-
-    Devuelve (índice del segmento, parámetro λ ∈ [0, 1] del pie, normal unitaria del segmento)."""
-    a, ab = v, np.roll(v, -1, axis=0) - v
-    ab2 = np.maximum((ab**2).sum(1), 1e-18)
-    lam = np.clip(((q[:, None, :] - a[None]) * ab[None]).sum(-1) / ab2[None], 0.0, 1.0)
-    foot = a[None] + lam[..., None] * ab[None]
-    idx = ((q[:, None, :] - foot) ** 2).sum(-1).argmin(1)
-    rows = np.arange(len(q))
-    seg = ab[idx]
-    norm = np.maximum(np.hypot(seg[:, 0], seg[:, 1]), 1e-12)
-    normal = np.column_stack([-seg[:, 1], seg[:, 0]]) / norm[:, None]
-    return idx, lam[rows, idx], normal
-
-
-def distance_residuals(
-    x: np.ndarray, dx: np.ndarray, y: np.ndarray, y_dense: np.ndarray
-) -> tuple[np.ndarray, np.ndarray]:
-    """Residuos y Jacobiano del objetivo sin correspondencia (2n residuos).
-
-    x (n, 2) curva del mecanismo, dx (n, 2, P) su Jacobiano, y (m, 2) muestras del objetivo y
-    y_dense (M, 2) su poligonal densa."""
-    n, n_params = len(x), dx.shape[2]
-    # mecanismo -> objetivo
-    idx_f, lam_f, nrm_f = _closest_on_polyline(x, y_dense)
-    foot = y_dense[idx_f] + lam_f[:, None] * (np.roll(y_dense, -1, axis=0)[idx_f] - y_dense[idx_f])
-    r_f = (nrm_f * (x - foot)).sum(1)
-    j_f = np.einsum("ki,kip->kp", nrm_f, dx)
-    # objetivo -> mecanismo
-    idx_b, lam_b, nrm_b = _closest_on_polyline(y, x)
-    nxt = (idx_b + 1) % n
-    foot_b = (1 - lam_b)[:, None] * x[idx_b] + lam_b[:, None] * x[nxt]
-    r_b = (nrm_b * (y - foot_b)).sum(1)
-    d_foot = (1 - lam_b)[:, None, None] * dx[idx_b] + lam_b[:, None, None] * dx[nxt]
-    j_b = -np.einsum("mi,mip->mp", nrm_b, d_foot)
-    # mismo número de residuos para ambos sentidos: n del mecanismo y len(y) del objetivo
-    return np.concatenate([r_f, r_b]), np.vstack([j_f, j_b]).reshape(-1, n_params)
+_principal_angle = principal_angle  # nombre histórico
 
 
 def _compactness(p: np.ndarray, size: float) -> tuple[np.ndarray, np.ndarray]:
@@ -307,38 +149,56 @@ def _compactness(p: np.ndarray, size: float) -> tuple[np.ndarray, np.ndarray]:
     return res, jac
 
 
-def _refine(
-    p0: np.ndarray, branch: int, y: np.ndarray, y_dense: np.ndarray, n: int, max_nfev: int
-) -> np.ndarray:
-    size = bbox_diag(y)
-    n_res = n + len(y) + 5
-    cache: dict[bytes, tuple[np.ndarray, np.ndarray]] = {}
+class FourBarFamily:
+    name = "four_bar"
+    n_params = N_PARAMS
+    n_compact = 5
 
-    def evaluate(p: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        key = p.tobytes()
-        if key not in cache:
-            cache.clear()
-            out = curve_and_jacobian(p, branch, n)
-            if out is None:  # mecanismo no ensamblable: penalización para rechazar el paso
-                cache[key] = (np.full(n_res, size), np.zeros((n_res, N_PARAMS)))
-            else:
-                r_d, j_d = distance_residuals(out[0], out[1], y, y_dense)
-                r_c, j_c = _compactness(p, size)
-                cache[key] = (np.concatenate([r_d, r_c]), np.vstack([j_d, j_c]))
-        return cache[key]
+    def build(self, p: np.ndarray, variant: Variant) -> Built | None:
+        return build(p, variant.branch)
 
-    res = least_squares(
-        lambda p: evaluate(p)[0],
-        p0,
-        jac=lambda p: evaluate(p)[1],
-        method="trf",
-        x_scale="jac",
-        max_nfev=max_nfev,
-        ftol=1e-10,
-        xtol=1e-10,
-        gtol=1e-10,
-    )
-    return np.asarray(res.x)
+    def compactness(
+        self, p: np.ndarray, size: float, variant: Variant
+    ) -> tuple[np.ndarray, np.ndarray]:
+        return _compactness(p, size)
+
+    def to_mechanism(self, p: np.ndarray, variant: Variant) -> FourBar | None:
+        return to_four_bar(p, variant.branch)
+
+    def candidates(
+        self, y: np.ndarray, n: int, n_candidates: int, n_keep: int, rng: np.random.Generator
+    ) -> list[Candidate]:
+        """Mejores candidatos aleatorios, ya alineados con el objetivo ``y``."""
+        size = float(np.hypot(*np.ptp(y, axis=0)))
+        pool: list[tuple[float, np.ndarray, int, np.ndarray]] = []
+        chunk = 4000
+        for _ in range(max(1, n_candidates // chunk)):
+            r = rng.uniform(0.1, 1.0, chunk)
+            lc = rng.uniform(0.6, 3.0, chunk)
+            rr = rng.uniform(0.6, 3.0, chunk)
+            tx = lc * rng.uniform(-0.5, 1.5, chunk)
+            ty = lc * rng.uniform(-1.0, 1.0, chunk)
+            br = rng.choice([-1, 1], chunk)
+            local, valid = _fast_local_curves(r, lc, rr, tx, ty, br.astype(float), n)
+            keep = np.where(valid)[0]
+            if keep.size == 0:
+                continue
+            local, r, lc, rr, tx, ty, br = (a[keep] for a in (local, r, lc, rr, tx, ty, br))
+            extent = np.maximum.reduce([np.ones_like(r), r, lc, rr, np.hypot(tx, ty)])
+            for al in rank_aligned(local, extent, y, n_keep):
+                i, f = al.index, al.scale
+                p0 = np.array(
+                    [al.origin[0], al.origin[1], al.phi, f, f * r[i], f * lc[i], f * rr[i],
+                     f * tx[i], f * ty[i], al.phi]
+                )
+                pool.append((al.cost, p0, int(br[i]), al.curve))
+        pool.sort(key=lambda item: item[0])
+        return [
+            Candidate(p0, Variant(br), cost / size, curve) for cost, p0, br, curve in pool[:n_keep]
+        ]
+
+
+FOUR_BAR = FourBarFamily()
 
 
 def fit_four_bar(
@@ -350,20 +210,10 @@ def fit_four_bar(
     max_nfev: int = 25,
     n_dense: int = 180,
     seed: int = 0,
+    on_progress: ProgressFn | None = None,
 ) -> FitResult | None:
     """Ajusta un cuadrilátero a ``target`` (curva cerrada (m, 2)); None si no hay ninguno válido."""
-    y = resample_closed(target, n)
-    y_dense = resample_closed(target, n_dense)
-    size = bbox_diag(y)
-    rng = np.random.default_rng(seed)
-    starts = _initial_candidates(y, n, n_candidates, n_refine, rng)
-    best: FitResult | None = None
-    for p0, branch, init_rel in starts:
-        p = _refine(p0, branch, y, y_dense, n, max_nfev)
-        curve = trace_curve(p, branch, n_dense)
-        if curve is None:
-            continue
-        rms = chamfer_rms(curve, y_dense)
-        if best is None or rms < best.rms:
-            best = FitResult(p, branch, rms, rms / size, curve, init_rel)
-    return best
+    return fit(
+        target, [FOUR_BAR], n=n, n_candidates=n_candidates, n_refine=n_refine,
+        max_nfev=max_nfev, n_dense=n_dense, seed=seed, on_progress=on_progress,
+    )
