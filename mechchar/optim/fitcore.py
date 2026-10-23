@@ -63,10 +63,34 @@ class Candidate:
     curve: np.ndarray  # curva del candidato ya alineada con el objetivo (n, 2)
 
 
+@dataclass
+class LocalSample:
+    """Muestras aleatorias de una familia en su marco local (bancada de largo 1, solo válidas)."""
+
+    curves: np.ndarray  # (K, n, 2) curva del marcador en el marco de la bancada
+    extent: np.ndarray  # (K,) mayor dimensión del mecanismo, en unidades locales
+    shape: np.ndarray  # (K, m) parámetros de forma de cada muestra (específicos de la familia)
+    variants: list[Variant]  # (K,) elección discreta de cada muestra
+
+
+# Fuente alternativa de candidatos (p. ej. la base de movimientos): (familia, objetivo, n_keep).
+CandidateSource = Callable[["Family", np.ndarray, int], "list[Candidate]"]
+
+
 class Family(Protocol):
     name: str
     n_params: int
     n_compact: int  # cantidad de residuos de compacidad
+
+    def sample_local(
+        self, rng: np.random.Generator, k: int, n: int
+    ) -> LocalSample | None: ...
+
+    def assemble(
+        self, shape: np.ndarray, variant: Variant, scale: float, phi: float, origin: np.ndarray
+    ) -> np.ndarray:
+        """Vector de parámetros completo a partir de una muestra local y su pose en el mundo."""
+        ...
 
     def build(self, p: np.ndarray, variant: Variant) -> Built | None: ...
 
@@ -378,8 +402,12 @@ def fit(
     n_dense: int = 180,
     seed: int = 0,
     on_progress: ProgressFn | None = None,
+    candidate_source: CandidateSource | None = None,
 ) -> FitResult | None:
     """Ajusta el mejor mecanismo de ``families`` a ``target`` (curva cerrada (m, 2)).
+
+    Si hay ``candidate_source`` se usa para elegir los puntos de partida (si no devuelve nada para
+    una familia, se cae a la búsqueda aleatoria de la propia familia).
 
     Devuelve None si ninguna familia produce un mecanismo válido. ``on_progress(etiqueta, curva)``
     recibe la curva del candidato inicial y luego la de cada evaluación del refinamiento."""
@@ -389,7 +417,9 @@ def fit(
     best: FitResult | None = None
     for fi, fam in enumerate(families):
         rng = np.random.default_rng(seed + fi)
-        starts = fam.candidates(y, n, n_candidates, n_refine, rng)
+        starts = candidate_source(fam, y, n_refine) if candidate_source is not None else []
+        if not starts:
+            starts = fam.candidates(y, n, n_candidates, n_refine, rng)
         if starts and on_progress is not None:
             on_progress(f"{fam.name}: candidato inicial", starts[0].curve)
         for c in starts:

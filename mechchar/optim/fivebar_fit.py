@@ -26,6 +26,7 @@ from mechchar.optim.fitcore import (
     MAX_LINK_RATIO,
     Built,
     Candidate,
+    LocalSample,
     Variant,
     curve_and_jacobian_generic,
     rank_aligned,
@@ -155,6 +156,40 @@ class GearedFiveBarFamily:
     def to_mechanism(self, p: np.ndarray, variant: Variant) -> GearedFiveBar | None:
         return to_five_bar(p, variant)
 
+    def sample_local(self, rng: np.random.Generator, k: int, n: int) -> LocalSample | None:
+        ratio = rng.choice(RATIOS, k)
+        frac1 = np.abs(ratio) / (1.0 + np.abs(ratio))
+        frac2 = 1.0 / (1.0 + np.abs(ratio))
+        r1 = rng.uniform(0.15, 1.0, k) * CRANK_FIT * frac1
+        r2 = rng.uniform(0.15, 1.0, k) * CRANK_FIT * frac2
+        l1 = rng.uniform(0.4, 3.0, k)
+        l2 = rng.uniform(0.4, 3.0, k)
+        tx = l1 * rng.uniform(-0.5, 1.5, k)
+        ty = l1 * rng.uniform(-1.0, 1.0, k)
+        delta = rng.uniform(0.0, TWO_PI, k)
+        br = rng.choice([-1, 1], k)
+        local, valid = _fast_local_curves(r1, r2, l1, l2, tx, ty, ratio, delta, br.astype(float), n)
+        keep = np.where(valid)[0]
+        if keep.size == 0:
+            return None
+        r1, r2, l1, l2, tx, ty, ratio, delta, br = (
+            a[keep] for a in (r1, r2, l1, l2, tx, ty, ratio, delta, br)
+        )
+        extent = np.maximum.reduce([np.ones_like(r1), r1, r2, l1, l2, np.hypot(tx, ty)])
+        shape = np.stack([r1, r2, l1, l2, tx, ty, delta], axis=1)
+        variants = [Variant(int(b), float(q)) for b, q in zip(br, ratio, strict=True)]
+        return LocalSample(local[keep], extent, shape, variants)
+
+    def assemble(
+        self, shape: np.ndarray, variant: Variant, scale: float, phi: float, origin: np.ndarray
+    ) -> np.ndarray:
+        r1, r2, l1, l2, tx, ty, delta = (float(v) for v in shape)
+        f = scale
+        return np.array(
+            [origin[0], origin[1], phi, f, f * r1, f * r2, f * l1, f * l2, f * tx, f * ty,
+             0.0, delta]
+        )
+
     def candidates(
         self, y: np.ndarray, n: int, n_candidates: int, n_keep: int, rng: np.random.Generator
     ) -> list[Candidate]:
@@ -163,34 +198,13 @@ class GearedFiveBarFamily:
         pool: list[tuple[float, np.ndarray, Variant, np.ndarray]] = []
         chunk = 4000
         for _ in range(max(1, n_candidates // chunk)):
-            ratio = rng.choice(RATIOS, chunk)
-            frac1 = np.abs(ratio) / (1.0 + np.abs(ratio))
-            frac2 = 1.0 / (1.0 + np.abs(ratio))
-            r1 = rng.uniform(0.15, 1.0, chunk) * CRANK_FIT * frac1
-            r2 = rng.uniform(0.15, 1.0, chunk) * CRANK_FIT * frac2
-            l1 = rng.uniform(0.4, 3.0, chunk)
-            l2 = rng.uniform(0.4, 3.0, chunk)
-            tx = l1 * rng.uniform(-0.5, 1.5, chunk)
-            ty = l1 * rng.uniform(-1.0, 1.0, chunk)
-            delta = rng.uniform(0.0, TWO_PI, chunk)
-            br = rng.choice([-1, 1], chunk)
-            local, valid = _fast_local_curves(
-                r1, r2, l1, l2, tx, ty, ratio, delta, br.astype(float), n
-            )
-            keep = np.where(valid)[0]
-            if keep.size == 0:
+            s = self.sample_local(rng, chunk, n)
+            if s is None:
                 continue
-            local, r1, r2, l1, l2, tx, ty, ratio, delta, br = (
-                a[keep] for a in (local, r1, r2, l1, l2, tx, ty, ratio, delta, br)
-            )
-            extent = np.maximum.reduce([np.ones_like(r1), r1, r2, l1, l2, np.hypot(tx, ty)])
-            for al in rank_aligned(local, extent, y, n_keep):
-                i, f = al.index, al.scale
-                p0 = np.array(
-                    [al.origin[0], al.origin[1], al.phi, f, f * r1[i], f * r2[i], f * l1[i],
-                     f * l2[i], f * tx[i], f * ty[i], 0.0, delta[i]]
-                )
-                pool.append((al.cost, p0, Variant(int(br[i]), float(ratio[i])), al.curve))
+            for al in rank_aligned(s.curves, s.extent, y, n_keep):
+                i = al.index
+                p0 = self.assemble(s.shape[i], s.variants[i], al.scale, al.phi, al.origin)
+                pool.append((al.cost, p0, s.variants[i], al.curve))
         pool.sort(key=lambda item: item[0])
         return [Candidate(p0, v, cost / size, curve) for cost, p0, v, curve in pool[:n_keep]]
 

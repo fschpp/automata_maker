@@ -24,6 +24,7 @@ from mechchar.optim.fitcore import (
     Built,
     Candidate,
     FitResult,
+    LocalSample,
     ProgressFn,
     Variant,
     curve_and_jacobian_generic,
@@ -165,37 +166,48 @@ class FourBarFamily:
     def to_mechanism(self, p: np.ndarray, variant: Variant) -> FourBar | None:
         return to_four_bar(p, variant.branch)
 
+    def sample_local(self, rng: np.random.Generator, k: int, n: int) -> LocalSample | None:
+        r = rng.uniform(0.1, 1.0, k)
+        lc = rng.uniform(0.6, 3.0, k)
+        rr = rng.uniform(0.6, 3.0, k)
+        tx = lc * rng.uniform(-0.5, 1.5, k)
+        ty = lc * rng.uniform(-1.0, 1.0, k)
+        br = rng.choice([-1, 1], k)
+        local, valid = _fast_local_curves(r, lc, rr, tx, ty, br.astype(float), n)
+        keep = np.where(valid)[0]
+        if keep.size == 0:
+            return None
+        r, lc, rr, tx, ty, br = (a[keep] for a in (r, lc, rr, tx, ty, br))
+        extent = np.maximum.reduce([np.ones_like(r), r, lc, rr, np.hypot(tx, ty)])
+        shape = np.stack([r, lc, rr, tx, ty], axis=1)
+        return LocalSample(local[keep], extent, shape, [Variant(int(b)) for b in br])
+
+    def assemble(
+        self, shape: np.ndarray, variant: Variant, scale: float, phi: float, origin: np.ndarray
+    ) -> np.ndarray:
+        r, lc, rr, tx, ty = (float(v) for v in shape)
+        f = scale
+        return np.array(
+            [origin[0], origin[1], phi, f, f * r, f * lc, f * rr, f * tx, f * ty, phi]
+        )
+
     def candidates(
         self, y: np.ndarray, n: int, n_candidates: int, n_keep: int, rng: np.random.Generator
     ) -> list[Candidate]:
         """Mejores candidatos aleatorios, ya alineados con el objetivo ``y``."""
         size = float(np.hypot(*np.ptp(y, axis=0)))
-        pool: list[tuple[float, np.ndarray, int, np.ndarray]] = []
+        pool: list[tuple[float, np.ndarray, Variant, np.ndarray]] = []
         chunk = 4000
         for _ in range(max(1, n_candidates // chunk)):
-            r = rng.uniform(0.1, 1.0, chunk)
-            lc = rng.uniform(0.6, 3.0, chunk)
-            rr = rng.uniform(0.6, 3.0, chunk)
-            tx = lc * rng.uniform(-0.5, 1.5, chunk)
-            ty = lc * rng.uniform(-1.0, 1.0, chunk)
-            br = rng.choice([-1, 1], chunk)
-            local, valid = _fast_local_curves(r, lc, rr, tx, ty, br.astype(float), n)
-            keep = np.where(valid)[0]
-            if keep.size == 0:
+            s = self.sample_local(rng, chunk, n)
+            if s is None:
                 continue
-            local, r, lc, rr, tx, ty, br = (a[keep] for a in (local, r, lc, rr, tx, ty, br))
-            extent = np.maximum.reduce([np.ones_like(r), r, lc, rr, np.hypot(tx, ty)])
-            for al in rank_aligned(local, extent, y, n_keep):
-                i, f = al.index, al.scale
-                p0 = np.array(
-                    [al.origin[0], al.origin[1], al.phi, f, f * r[i], f * lc[i], f * rr[i],
-                     f * tx[i], f * ty[i], al.phi]
-                )
-                pool.append((al.cost, p0, int(br[i]), al.curve))
+            for al in rank_aligned(s.curves, s.extent, y, n_keep):
+                i = al.index
+                p0 = self.assemble(s.shape[i], s.variants[i], al.scale, al.phi, al.origin)
+                pool.append((al.cost, p0, s.variants[i], al.curve))
         pool.sort(key=lambda item: item[0])
-        return [
-            Candidate(p0, Variant(br), cost / size, curve) for cost, p0, br, curve in pool[:n_keep]
-        ]
+        return [Candidate(p0, v, cost / size, curve) for cost, p0, v, curve in pool[:n_keep]]
 
 
 FOUR_BAR = FourBarFamily()
