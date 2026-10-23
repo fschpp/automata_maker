@@ -11,3 +11,11 @@ pip install -e ".[dev]"
 python -m mechchar          # abre la ventana (rueda = zoom, arrastrar = pan)
 pytest && ruff check . && mypy mechchar
 ```
+
+## Scripts
+```bash
+# prueba de humo de la ventana sin pantalla: arrastra un punto, ajusta y anima (capturas en /tmp)
+GSK_RENDERER=cairo GDK_BACKEND=x11 PYTHONPATH=. xvfb-run -a python3 scripts/smoke_ui.py
+# gradiente por función implícita vs diferencias finitas (tiempo y error)
+PYTHONPATH=. python3 scripts/bench_gradient.py
+```

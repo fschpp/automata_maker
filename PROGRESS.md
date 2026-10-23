@@ -1,10 +1,10 @@
 # PROGRESS.md — Mechanical Characters Designer (Python + GTK4)
 
 Basado en: Coros et al., *Computational Design of Mechanical Characters* (SIGGRAPH 2013, Disney Research).
-Última actualización: 2026-10-22 · Rama: `main` · Plan: v3.0 · Estado: M0 y M1 hechos (falta confirmar zoom/pan con el mouse); M2 con ajuste interactivo del cuadrilátero funcionando; faltan el 5-bar con engranajes, la manivela-corredera y la escena de la pierna
+Última actualización: 2026-10-22 · Rama: `main` · Plan: v3.1 · Estado: M0 y M1 hechos (falta confirmar zoom/pan con el mouse); M2 con ajuste interactivo entre dos familias (cuadrilátero y 5-bar con engranajes), convergencia en vivo y prueba de robustez; faltan la manivela-corredera y la escena de la pierna
 
 ## Current Focus
-Completar M2: 5-bar con engranajes y manivela-corredera parametrizados (que el ajuste elija entre familias), mostrar la convergencia paso a paso, prueba de robustez con un inicial malo y la escena de la pierna. Después, M3 (métrica y base de movimientos) para que el ajuste sea casi instantáneo. Objetivo general: llegar lo antes posible al primer "corte vertical" funcional: un cuadrilátero articulado animado en GTK que ajusta una curva dibujada con el mouse (M1 + M2). Ya existe para el cuadrilátero.
+Terminar M2: falta la manivela-corredera como tercera familia y la escena de la pierna (marcador sobre una pieza del personaje, con el estado del personaje dentro de la simulación). Después, M3 (métrica y base de movimientos) para que el ajuste sea casi instantáneo. Objetivo general: llegar lo antes posible al primer "corte vertical" funcional: un cuadrilátero articulado animado en GTK que ajusta una curva dibujada con el mouse (M1 + M2). Ya existe para el cuadrilátero y el 5-bar con engranajes (el ajuste elige entre ambos).
 
 ## Principios del plan v2
 1. **Cortes verticales, no capas:** cada hito termina en algo que se ve y se prueba en la app. El paper construye la base de movimientos primero; acá la dejamos para M3 como *optimización de velocidad y calidad* de algo que ya funciona.
@@ -95,6 +95,9 @@ Reglas: `ui` depende de `core`, nunca al revés. Las optimizaciones largas corre
 - [x] M1 (UI): cuadrilátero animado en el canvas con la curva del marcador, botón Pausa y deslizador de fase; `Playback` con 6 tests; 32 tests en total, y prueba de humo de la ventana con Xvfb (2026-10-22)
 - [x] M2 (núcleo, solo cuadrilátero): `optim/curves.py` (remuestreo, tamaño, chamfer, correspondencia) y `optim/fourbar_fit.py` (modelo paramétrico, gradiente por función implícita, búsqueda con reinicios y refinamiento). Criterio de aceptación: elipse 0,5 %, frijol 1,7 % y curva de otro cuadrilátero 0,4 % del tamaño de la curva (< 3 %), ~7 s por ajuste; 43 tests en verde (2026-10-22)
 - [x] M2 (UI): editor de spline, botón Ajustar con hilo de trabajo, `Viewport.fit_bounds`, `scripts/smoke_ui.py` prueba arrastrar un punto + ajustar + animar con Xvfb (error 1,3 %, 7 s); 50 tests en verde (2026-10-22)
+- [x] M2 (familias): el ajuste se generalizó a un protocolo `Family` (`optim/fitcore.py`: gradiente por función implícita, objetivo sin correspondencia, refinamiento, búsqueda y `refine_from`), con el cuadrilátero rehecho como familia (mismos resultados) y el **5-bar con dos engranajes** como segunda (`core/mechanisms.py::geared_five_bar`, `optim/fivebar_fit.py`; 12 parámetros, relación ±1/±2 como variante discreta, radios de los engranajes derivados de la relación, manivelas dentro de su engranaje). `optim/families.py::fit_best` ajusta ambas y se queda con la de menor error: elipse 0,37 % y frijol 0,43 % (el cuadrilátero solo daba 1,7 % en el frijol), ~10 s en total (2026-10-22)
+- [x] M2 (convergencia en vivo y robustez): el ajuste informa la curva en evaluación (`on_progress`, limitado a ~7 por segundo) y la UI la dibuja en naranja sobre la spline objetivo; `refine_from` + test que parte de un inicial con más de 10 % de error y converge a < 3 % (cuadrilátero y 5-bar) (2026-10-22)
+- [x] M2 (rendimiento): `world_point` sin matrices y Newton propio en `Assembly.solve` bajaron ~3,4× el costo de curva + Jacobiano (307 → 91 ms con n = 48); `scripts/bench_gradient.py` compara con diferencias finitas completas: implícita 7–11× más rápida, error relativo < 1e-8; 74 tests en verde (2026-10-22)
 
 ### [/] In Progress
 - [/] M0 — Falta confirmar que el zoom (rueda) y el pan (arrastrar) responden en tu máquina; la ventana, la grilla y los ejes ya se ven (captura 2026-10-22)
@@ -107,7 +110,7 @@ Reglas: `ui` depende de `core`, nunca al revés. Las optimizaciones largas corre
 **M1 — Simulador + visor (paper §3)**
 - [x] `Component` 2D (x, y, θ) y `Assembly`, con un campo `z` (plano de profundidad) desde el principio, aunque la simulación sea 2D
 - [x] Conexiones: Pin, Point-On-Line, Phase (engranajes, ratio −r, con un offset de fase φ opcional para el desfase entre mecanismos), Fixed State
-- [x] Solver de min ½CᵀC con `least_squares` y Jacobiano analítico; luego Newton propio si hace falta
+- [x] Solver de min ½CᵀC con Jacobiano analítico: Newton amortiguado propio (paso de mínimos cuadrados + búsqueda en línea) con respaldo a `least_squares` (trf) cuando no converge
 - [x] **Continuación por fase:** cada paso arranca desde la solución anterior para seguir la misma rama de ensamblado (evita saltos de configuración del cuadrilátero)
 - [x] Detección de ciclo completo: rechazar mecanismos que se traban o saltan de rama (condición de Grashof / salto máximo entre fases consecutivas)
 - [x] Detección sobre/subrestringido (mínimo ≠ 0 / Hessiano singular)
@@ -115,15 +118,15 @@ Reglas: `ui` depende de `core`, nunca al revés. Las optimizaciones largas corre
 - [x] Tests: cuadrilátero y manivela-corredera contra soluciones analíticas; test de gradiente
 
 **M2 — Ajuste de curva sin base de datos (paper §4.2)**
-- [/] Mecanismos parametrizados: cuadrilátero, 5-bar con 2 engranajes (ratios −2, −1, 1, 2), manivela-corredera — hecho solo el cuadrilátero (10 parámetros: pose de la bancada, 4 largos, marcador y desfase); faltan el 5-bar con engranajes y la manivela-corredera parametrizados
+- [/] Mecanismos parametrizados: cuadrilátero (10 parámetros: pose de la bancada, 4 largos, marcador y desfase) y 5-bar con 2 engranajes (12 parámetros, ratios −2, −1, 1, 2) hechos; falta la manivela-corredera parametrizada como tercera familia
 - [x] Marcador (punto que traza la curva) y curva en un ciclo (cuadrilátero)
 - [x] Objetivo: **cambió respecto del paper/plan.** La correspondencia fija x(p, t_k) = x̂_k deja un piso de error de ~2 % aunque el objetivo sea la curva exacta de un cuadrilátero, porque el marcador no recorre su curva a velocidad uniforme. Se usan distancias punto-a-curva en ambos sentidos (residuo a lo largo de la normal del segmento más cercano), sin correspondencia; ver `optim/fourbar_fit.py`
 - [x] Compacidad: sin restricción, el ajuste elegía mecanismos válidos pero con eslabones enormes. Ahora ningún eslabón ni el marcador supera 1,5 veces el tamaño de la curva (filtro de candidatos + residuos de bisagra en el refinamiento) sin perder calidad de ajuste
 - [x] Gradiente por Teorema de la Función Implícita: ∂s/∂p = −(∂C/∂s)⁻¹ ∂C/∂p (∂C/∂p por diferencias finitas, ∂C/∂s analítico, pseudo-inversa si hay restricciones redundantes) — hecho con el simulador genérico; coincide con diferencias finitas con error relativo < 1e-5 (`test_implicit_function_gradient_matches_finite_differences`)
-- [/] Reinicios aleatorios + `least_squares` (trf) con el Jacobiano por función implícita (en vez de BFGS: el objetivo es de mínimos cuadrados). Los candidatos se ordenan con una evaluación analítica vectorizada y alineación por ejes principales; los 2 mejores se refinan. Falta medir la ganancia frente a diferencias finitas completas (el paper reporta 20–30×)
+- [x] Reinicios aleatorios + `least_squares` (trf) con el Jacobiano por función implícita (en vez de BFGS: el objetivo es de mínimos cuadrados). Los candidatos se ordenan con una evaluación analítica vectorizada y alineación por ejes principales; los 2 mejores de cada familia se refinan. Ganancia medida frente a diferencias finitas completas: 7–11× (el paper reporta 20–30×; la nuestra es menor porque ∂C/∂p sigue por diferencias finitas y el simulador está en Python)
 - [x] UI: spline cerrada (Catmull-Rom) con 8 puntos de control arrastrables, botón «Ajustar mecanismo» que corre el ajuste en un hilo (`optim/job.py`, solo el último pedido), animación del mecanismo ajustado, zoom automático al resultado y aviso si la curva cambió después del ajuste. El ajuste tarda ~7 s, así que no es en vivo mientras se arrastra (eso llega con la base de movimientos de M3)
-- [/] Mostrar en vivo la curva objetivo (rojo) y la curva actual (blanco) mientras converge la optimización — hoy se ve el objetivo (negro) y la curva resultante (rosa) al terminar; falta mostrar la convergencia paso a paso
-- [ ] Prueba de robustez: partir de un inicial deliberadamente malo y comprobar que converge igual (el video lo muestra) — pendiente (hoy el inicial lo elige la búsqueda aleatoria, no el usuario)
+- [x] Mostrar en vivo la curva objetivo y la curva actual mientras converge la optimización — la objetivo es la spline negra y la actual se dibuja en naranja (candidato inicial y luego cada evaluación); al terminar queda la curva del mecanismo en rosa
+- [x] Prueba de robustez: partir de un inicial deliberadamente malo y comprobar que converge igual (el video lo muestra) — `tests/test_five_bar.py::test_refinement_converges_from_a_bad_initial_guess`; en pruebas manuales, con errores iniciales de 13–52 % del tamaño de la curva el refinamiento llegó a ~0,4 %. Un inicial que ni siquiera se ensambla se descarta. La UI todavía no deja elegir el inicial
 - [ ] **Marcador sobre una pieza del personaje** (Fig. 5 derecha): escena de prueba de una pierna (muslo con pivote fijo, tibia/pie y una varilla pasiva) accionada por un mecanismo de dos engranajes; optimizar para que el pie siga una elipse objetivo partiendo de una curva en forma de ocho, como en el video. Aquí el estado s_t incluye los grados de libertad del personaje
 - [ ] Alternativa a evaluar: autodiff con JAX para ahorrar derivadas a mano
 
@@ -233,6 +236,9 @@ Personaje 2D → dibujar 1–3 curvas → mecanismo optimizado por curva → un 
 Fuera del MVP: entrenamiento de la métrica, engranajes no circulares, movimiento 3D.
 
 ## Latest Blockers / Discoveries
+- El 5-bar con engranajes ajusta mejor que el cuadrilátero en el frijol (0,43 % vs 1,7 %) y empata en la elipse; con las dos familias el ajuste tarda ~10 s (antes 7 s con una). Para bajarlo: paralelizar familias en procesos o llegar a la base de movimientos de M3.
+- Resuelto: tras sumar la segunda familia el ajuste en la UI pasó de 7 s a 23 s; el cuello de botella eran las resoluciones con `least_squares` en cada fase de cada evaluación. Con Newton propio y `world_point` sin matrices bajó a ~10 s.
+- La relación de engranajes es una variante discreta (±1, ±2) y no un parámetro continuo, así que el período de la curva siempre coincide con el del Input Driver. En la UI los engranajes se dibujan como discos (los dientes llegan con M5).
 - Resuelto: GTK no importaba porque el venv usaba otro Python (3.12 fuera de apt); hay que crear el venv con `/usr/bin/python3 -m venv --system-site-packages .venv`. `scripts/smoke_ui.py` prueba la UI con Xvfb.
 - El video de YouTube (2013) es el material complementario oficial del paper; solo se pudo leer su descripción, que coincide con el abstract. Los ejemplos hay que verlos en el video.
 - El paper no publica código ni la biblioteca exacta de mecanismos: hay que diseñar los tipos propios a partir de la Fig. 4.
