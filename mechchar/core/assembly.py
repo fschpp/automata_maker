@@ -34,7 +34,9 @@ def drot(theta: float) -> np.ndarray:
 def world_point(state: np.ndarray, comp: int, local: Vec) -> np.ndarray:
     """Posición en el mundo de un punto dado en coordenadas locales de ``comp``."""
     i = 3 * comp
-    return state[i : i + 2] + rot(state[i + 2]) @ np.asarray(local, dtype=float)
+    c, s = math.cos(state[i + 2]), math.sin(state[i + 2])
+    lx, ly = local
+    return np.array([state[i] + c * lx - s * ly, state[i + 1] + s * lx + c * ly])
 
 
 # --- conexiones --------------------------------------------------------------------------------
@@ -238,8 +240,39 @@ class Assembly:
             row += c.n_eq
         return jac
 
+    def _newton(
+        self, s0: np.ndarray, t: float, tol: float, max_iter: int = 30
+    ) -> SolveResult | None:
+        """Newton amortiguado (paso de mínimos cuadrados + búsqueda en línea) con el Jacobiano
+        analítico. Devuelve None si no converge; ``solve`` recurre entonces a ``least_squares``."""
+        s = np.array(s0, dtype=float)
+        r = self.residual(s, t)
+        nr = float(np.linalg.norm(r))
+        for _ in range(max_iter):
+            if nr < tol:
+                return SolveResult(s, nr, True)
+            step = np.linalg.lstsq(self.jacobian(s, t), -r, rcond=None)[0]
+            lam = 1.0
+            while lam >= 1e-3:
+                s_new = s + lam * step
+                r_new = self.residual(s_new, t)
+                nr_new = float(np.linalg.norm(r_new))
+                if nr_new < (1.0 - 1e-4 * lam) * nr:
+                    break
+                lam *= 0.5
+            else:
+                return None
+            s, r, nr = s_new, r_new, nr_new
+        return SolveResult(s, nr, True) if nr < tol else None
+
     def solve(self, s0: np.ndarray, t: float, tol: float = 1e-9) -> SolveResult:
-        """Minimiza ½‖C(s, t)‖² partiendo de ``s0``. ``ok`` si el residuo final es < tol."""
+        """Minimiza ½‖C(s, t)‖² partiendo de ``s0``. ``ok`` si el residuo final es < tol.
+
+        Primero Newton con el Jacobiano analítico (rápido cerca de la solución, como en la
+        continuación por fase); si no converge, ``least_squares`` (trf)."""
+        fast = self._newton(s0, t, tol)
+        if fast is not None:
+            return fast
         res = least_squares(
             lambda s: self.residual(s, t),
             s0,
