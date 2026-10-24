@@ -221,6 +221,41 @@ def _link(name: str, a: Vec, b: Vec, **kw: Any) -> Part:
     return Part(name, a[0], a[1], math.atan2(b[1] - a[1], b[0] - a[0]), _bar(length), **kw)
 
 
+_LEG_HIP, _LEG_KNEE = (0.0, 0.0), (0.9, -1.2)
+_LEG_ANKLE, _LEG_TOE = (0.0, -2.4), (0.9, -2.5)
+
+
+def _leg_chain(prefix: str = "", z: float = 0.0) -> tuple[list[Part], list[Pivot]]:
+    """Piezas y pivotes de una pierna (sin pelvis): muslo, pantorrilla, pie y varilla pasiva.
+    ``prefix`` se antepone a los nombres y ``z`` es el plano de profundidad de la pierna; el
+    primer pivote une la pelvis (que pone quien llama) con el muslo."""
+    hip, knee, ankle, toe = _LEG_HIP, _LEG_KNEE, _LEG_ANKLE, _LEG_TOE
+    rod_top = (0.5 * knee[0], 0.5 * knee[1])  # sobre el muslo
+    heel = (ankle[0] + 0.75 * (toe[0] - ankle[0]), ankle[1] + 0.75 * (toe[1] - ankle[1]))
+    foot = _link(prefix + "foot", ankle, toe, z=z)
+    foot_len = math.hypot(toe[0] - ankle[0], toe[1] - ankle[1])
+    foot.outline = [(-0.12, -0.12), (foot_len, -0.12), (foot_len, 0.12), (-0.12, 0.12)]
+    parts = [
+        _link(prefix + "thigh", hip, knee, z=z),
+        _link(prefix + "shank", knee, ankle, z=z),
+        foot,
+        _link(prefix + "rod", rod_top, heel, z=z),
+    ]
+    pivots = [
+        Pivot("pelvis", prefix + "thigh", hip),
+        Pivot(prefix + "thigh", prefix + "shank", knee),
+        Pivot(prefix + "shank", prefix + "foot", ankle),
+        Pivot(prefix + "thigh", prefix + "rod", rod_top),
+        Pivot(prefix + "foot", prefix + "rod", heel),
+    ]
+    return parts, pivots
+
+
+def _pelvis() -> Part:
+    outline = [(-0.7, 0.25), (0.7, 0.25), (0.7, -0.25), (-0.7, -0.25)]
+    return Part("pelvis", 0.0, 0.0, 0.0, outline, fixed=True)
+
+
 def leg_character() -> Character:
     """Pierna de prueba (vista lateral): cadera fija, muslo, pantorrilla, pie y una varilla pasiva
     del muslo al pie. Sola tiene 2 grados de libertad (el ángulo del muslo y el del lazo
@@ -230,29 +265,26 @@ def leg_character() -> Character:
     La rodilla está flexionada en reposo y la varilla se engancha lejos del tobillo: con la pierna
     estirada, o con el enganche pegado al tobillo, el reposo queda en el borde de la zona
     alcanzable y el mecanismo no puede moverla en todas las direcciones."""
-    hip, knee, ankle, toe = (0.0, 0.0), (0.9, -1.2), (0.0, -2.4), (0.9, -2.5)
-    rod_top = (0.5 * knee[0], 0.5 * knee[1])  # sobre el muslo
-    heel = (ankle[0] + 0.75 * (toe[0] - ankle[0]), ankle[1] + 0.75 * (toe[1] - ankle[1]))
-    pelvis_outline = [(-0.7, 0.25), (0.7, 0.25), (0.7, -0.25), (-0.7, -0.25)]
-    pelvis = Part("pelvis", 0.0, 0.0, 0.0, pelvis_outline, fixed=True)
-    foot = _link("foot", ankle, toe)
-    foot_len = math.hypot(toe[0] - ankle[0], toe[1] - ankle[1])
-    foot.outline = [(-0.12, -0.12), (foot_len, -0.12), (foot_len, 0.12), (-0.12, 0.12)]
-    parts = [
-        pelvis,
-        _link("thigh", hip, knee),
-        _link("shank", knee, ankle),
-        foot,
-        _link("rod", rod_top, heel),
-    ]
-    pivots = [
-        Pivot("pelvis", "thigh", hip),
-        Pivot("thigh", "shank", knee),
-        Pivot("shank", "foot", ankle),
-        Pivot("thigh", "rod", rod_top),
-        Pivot("foot", "rod", heel),
-    ]
-    return Character("pierna", parts, pivots)
+    parts, pivots = _leg_chain()
+    return Character("pierna", [_pelvis(), *parts], pivots)
+
+
+def biped_character() -> Character:
+    """Bípedo de prueba: una pelvis fija y dos piernas idénticas (prefijos ``l_`` y ``r_``) en
+    planos de profundidad distintos (z = 0 y 1), como las patas de cada lado del cuadrúpedo del
+    video. En la simulación 2D se superponen; solo se distinguen por ``z``. Solo tiene 4 grados
+    de libertad: 2 por pierna."""
+    left, left_pivots = _leg_chain("l_", z=0.0)
+    right, right_pivots = _leg_chain("r_", z=1.0)
+    return Character("bipedo", [_pelvis(), *left, *right], [*left_pivots, *right_pivots])
+
+
+def leg_refs(prefix: str = "") -> tuple[PointRef, PointRef]:
+    """Punto de actuación y marcador de una pierna del personaje con ese prefijo."""
+    return (
+        PointRef(prefix + LEG_ATTACH.part, LEG_ATTACH.point),
+        PointRef(prefix + LEG_MARKER.part, LEG_MARKER.point),
+    )
 
 
 # Puntos de la pierna de prueba: dónde se une el mecanismo y qué punto debe seguir la curva.
