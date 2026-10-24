@@ -8,6 +8,7 @@ analítico; el ensamblaje resuelve min ½‖C‖² con ``least_squares`` partien
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -53,6 +54,15 @@ class Constraint(ABC):
     @abstractmethod
     def jacobian(self, s: np.ndarray, t: float, out: np.ndarray) -> None:
         """Acumula (+=) las derivadas en ``out`` (forma n_eq x n_vars, inicializada en 0)."""
+
+    def shifted(self, k: int) -> Constraint:
+        """Copia con todos los índices de componente desplazados ``k`` posiciones."""
+        moved = {
+            f.name: getattr(self, f.name) + k
+            for f in dataclasses.fields(self)  # type: ignore[arg-type]
+            if f.name in ("a", "b", "comp")
+        }
+        return dataclasses.replace(self, **moved)  # type: ignore[type-var]
 
 
 @dataclass
@@ -211,6 +221,14 @@ class Assembly:
     ) -> int:
         self.components.append(Component(name, x, y, theta, z))
         return len(self.components) - 1
+
+    def append(self, other: Assembly) -> int:
+        """Agrega los componentes y conexiones de ``other`` (reindexados) y devuelve el índice
+        que tiene su primer componente en este ensamblaje."""
+        offset = len(self.components)
+        self.components.extend(dataclasses.replace(c) for c in other.components)
+        self.constraints.extend(c.shifted(offset) for c in other.constraints)
+        return offset
 
     def add(self, constraint: Constraint) -> Constraint:
         self.constraints.append(constraint)

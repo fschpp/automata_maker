@@ -1,0 +1,260 @@
+"""Personaje articulado 2D (M4): piezas rígidas, articulaciones y piezas fijas. Sin GTK.
+
+Todo se define en la *pose de reposo* y en coordenadas del mundo: cada pieza tiene su pose
+(x, y, θ) y un contorno en coordenadas locales; cada articulación (pivote) es un punto del mundo
+compartido por dos piezas. Los puntos locales de los pasadores se calculan desde ahí, así que el
+reposo siempre cumple las restricciones. Las piezas fijas forman el chasis. ``z`` es el plano de
+profundidad de la pieza (la simulación es 2D por plano; cada sub-ensamblaje vive en el plano de
+la pieza que acciona).
+
+Formato en disco: JSON (``Character.save`` / ``Character.load``).
+"""
+
+from __future__ import annotations
+
+import json
+import math
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+
+from mechchar.core.assembly import Analysis, Assembly, FixedState, Pin, rot, world_point
+
+Vec = tuple[float, float]
+FORMAT_VERSION = 1
+
+
+@dataclass
+class Part:
+    name: str
+    x: float
+    y: float
+    theta: float
+    outline: list[Vec]  # polígono en coordenadas locales (dibujo y exportación)
+    fixed: bool = False  # parte del chasis
+    z: float = 0.0  # plano de profundidad
+
+
+@dataclass
+class Pivot:
+    a: str
+    b: str
+    point: Vec  # articulación, en el mundo y en la pose de reposo
+
+
+@dataclass
+class PointRef:
+    """Un punto sobre una pieza (marcador o punto de actuación), en el mundo en reposo."""
+
+    part: str
+    point: Vec
+
+
+@dataclass
+class Character:
+    name: str
+    parts: list[Part] = field(default_factory=list)
+    pivots: list[Pivot] = field(default_factory=list)
+
+    # --- consulta ---------------------------------------------------------------------------
+    def index(self, name: str) -> int:
+        for i, p in enumerate(self.parts):
+            if p.name == name:
+                return i
+        raise KeyError(f"pieza desconocida: {name!r}")
+
+    def local_point(self, part: str, world: Vec) -> Vec:
+        """Punto del mundo (en reposo) expresado en coordenadas locales de ``part``."""
+        p = self.parts[self.index(part)]
+        v = rot(-p.theta) @ (np.asarray(world, dtype=float) - np.array([p.x, p.y]))
+        return float(v[0]), float(v[1])
+
+    def validate(self) -> None:
+        names = [p.name for p in self.parts]
+        if len(set(names)) != len(names):
+            raise ValueError("hay piezas con el mismo nombre")
+        for pv in self.pivots:
+            if pv.a not in names or pv.b not in names:
+                raise ValueError(f"el pivote {pv.a}-{pv.b} usa una pieza inexistente")
+            if pv.a == pv.b:
+                raise ValueError("un pivote no puede unir una pieza consigo misma")
+
+    # --- simulación -------------------------------------------------------------------------
+    def build(self) -> tuple[Assembly, np.ndarray]:
+        """Ensamblaje del personaje y su estado de reposo (una pieza por componente, en orden)."""
+        self.validate()
+        asm = Assembly()
+        for p in self.parts:
+            asm.add_component(p.name, p.x, p.y, p.theta, p.z)
+        for i, p in enumerate(self.parts):
+            if p.fixed:
+                asm.add(FixedState(i, p.x, p.y, p.theta))
+        for pv in self.pivots:
+            asm.add(
+                Pin(
+                    self.index(pv.a), self.local_point(pv.a, pv.point),
+                    self.index(pv.b), self.local_point(pv.b, pv.point),
+                )
+            )
+        return asm, asm.initial_state()
+
+    def analyze(self) -> Analysis:
+        """Grados de libertad que le quedan al personaje solo (con su chasis fijo)."""
+        asm, s0 = self.build()
+        return asm.analyze(s0)
+
+    def part_polygon(self, state: np.ndarray, i: int) -> np.ndarray:
+        """Contorno de la pieza ``i`` en el mundo para un estado dado."""
+        return np.array([world_point(state, i, v) for v in self.parts[i].outline])
+
+    # --- JSON -------------------------------------------------------------------------------
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "version": FORMAT_VERSION,
+            "name": self.name,
+            "parts": [
+                {
+                    "name": p.name,
+                    "pose": [p.x, p.y, p.theta],
+                    "outline": [list(v) for v in p.outline],
+                    "fixed": p.fixed,
+                    "z": p.z,
+                }
+                for p in self.parts
+            ],
+            "pivots": [{"a": v.a, "b": v.b, "point": list(v.point)} for v in self.pivots],
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> Character:
+        if int(d.get("version", 0)) != FORMAT_VERSION:
+            raise ValueError("versión de personaje incompatible")
+        parts = []
+        for p in d["parts"]:
+            x, y, theta = (float(v) for v in p["pose"])
+            outline = [(float(a), float(b)) for a, b in p["outline"]]
+            parts.append(
+                Part(str(p["name"]), x, y, theta, outline, bool(p.get("fixed", False)),
+                     float(p.get("z", 0.0)))
+            )
+        pivots = [
+            Pivot(str(v["a"]), str(v["b"]), (float(v["point"][0]), float(v["point"][1])))
+            for v in d["pivots"]
+        ]
+        ch = cls(str(d["name"]), parts, pivots)
+        ch.validate()
+        return ch
+
+    def save(self, path: str | Path) -> None:
+        Path(path).write_text(json.dumps(self.to_dict(), indent=2), encoding="utf-8")
+
+    @classmethod
+    def load(cls, path: str | Path) -> Character:
+        return cls.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
+
+
+# --- unión con un mecanismo ---------------------------------------------------------------------
+
+
+@dataclass
+class RiggedMechanism:
+    """Un mecanismo unido a un personaje, simulados juntos. El estado es el del personaje
+    (``n_char`` piezas) seguido del de los componentes del mecanismo."""
+
+    asm: Assembly
+    state0: np.ndarray
+    character: Character
+    n_char: int
+    base: Any  # el mecanismo (FourBar / GearedFiveBar), indexado desde 0 sobre su propio tramo
+    marker_part: int
+    marker_local: Vec
+
+    def mech_state(self, state: np.ndarray) -> np.ndarray:
+        return state[3 * self.n_char :]
+
+    def marker_world(self, state: np.ndarray) -> np.ndarray:
+        return world_point(state, self.marker_part, self.marker_local)
+
+    def part_polygons(self, state: np.ndarray) -> list[np.ndarray]:
+        return [self.character.part_polygon(state, i) for i in range(self.n_char)]
+
+    def outline_points(self, state: np.ndarray) -> np.ndarray:
+        pts = [poly for poly in self.part_polygons(state)]
+        pts.append(np.asarray(self.base.outline_points(self.mech_state(state))))
+        return np.vstack(pts)
+
+
+def combine(character: Character, built: Any, attach: PointRef, marker: PointRef) -> Any:
+    """Une un mecanismo armado (``Built``) al personaje con un pasador entre su marcador y el
+    punto de actuación ``attach``. Devuelve un ``Built`` cuyo marcador es el de ``marker`` (el
+    punto del personaje cuya curva se quiere controlar)."""
+    from mechchar.optim.fitcore import Built  # import tardío: ``optim`` depende de ``core``
+
+    asm, s_char = character.build()
+    offset = asm.append(built.asm)
+    asm.add(
+        Pin(
+            built.coupler + offset, built.tracer,
+            character.index(attach.part), character.local_point(attach.part, attach.point),
+        )
+    )
+    state0 = np.concatenate([s_char, built.state0])
+    return Built(
+        asm, state0, character.index(marker.part), character.local_point(marker.part, marker.point)
+    )
+
+
+# --- personajes de prueba -----------------------------------------------------------------------
+
+
+def _bar(length: float, half_width: float = 0.12) -> list[Vec]:
+    """Contorno de una barra que va de (0, 0) a (length, 0) en coordenadas locales."""
+    w = half_width
+    return [(-w, -w), (length + w, -w), (length + w, w), (-w, w)]
+
+
+def _link(name: str, a: Vec, b: Vec, **kw: Any) -> Part:
+    """Pieza que va del punto ``a`` al punto ``b`` (su eje local x apunta de a hacia b)."""
+    length = math.hypot(b[0] - a[0], b[1] - a[1])
+    return Part(name, a[0], a[1], math.atan2(b[1] - a[1], b[0] - a[0]), _bar(length), **kw)
+
+
+def leg_character() -> Character:
+    """Pierna de prueba (vista lateral): cadera fija, muslo, pantorrilla, pie y una varilla pasiva
+    del muslo al pie. Sola tiene 2 grados de libertad (el ángulo del muslo y el del lazo
+    muslo-pantorrilla-pie-varilla), de modo que un mecanismo unido por un pasador a un punto de
+    la pantorrilla la deja con 0.
+
+    La rodilla está flexionada en reposo y la varilla se engancha lejos del tobillo: con la pierna
+    estirada, o con el enganche pegado al tobillo, el reposo queda en el borde de la zona
+    alcanzable y el mecanismo no puede moverla en todas las direcciones."""
+    hip, knee, ankle, toe = (0.0, 0.0), (0.9, -1.2), (0.0, -2.4), (0.9, -2.5)
+    rod_top = (0.5 * knee[0], 0.5 * knee[1])  # sobre el muslo
+    heel = (ankle[0] + 0.75 * (toe[0] - ankle[0]), ankle[1] + 0.75 * (toe[1] - ankle[1]))
+    pelvis_outline = [(-0.7, 0.25), (0.7, 0.25), (0.7, -0.25), (-0.7, -0.25)]
+    pelvis = Part("pelvis", 0.0, 0.0, 0.0, pelvis_outline, fixed=True)
+    foot = _link("foot", ankle, toe)
+    foot_len = math.hypot(toe[0] - ankle[0], toe[1] - ankle[1])
+    foot.outline = [(-0.12, -0.12), (foot_len, -0.12), (foot_len, 0.12), (-0.12, 0.12)]
+    parts = [
+        pelvis,
+        _link("thigh", hip, knee),
+        _link("shank", knee, ankle),
+        foot,
+        _link("rod", rod_top, heel),
+    ]
+    pivots = [
+        Pivot("pelvis", "thigh", hip),
+        Pivot("thigh", "shank", knee),
+        Pivot("shank", "foot", ankle),
+        Pivot("thigh", "rod", rod_top),
+        Pivot("foot", "rod", heel),
+    ]
+    return Character("pierna", parts, pivots)
+
+
+# Puntos de la pierna de prueba: dónde se une el mecanismo y qué punto debe seguir la curva.
+LEG_ATTACH = PointRef("shank", (0.45, -1.8))  # medio de la pantorrilla
+LEG_MARKER = PointRef("foot", (0.9, -2.5))  # punta del pie
