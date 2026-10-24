@@ -9,8 +9,15 @@ import numpy as np
 gi.require_version("Gtk", "4.0")
 from gi.repository import GLib, Gtk  # noqa: E402
 
-from mechchar.core.character import LEG_ATTACH, LEG_MARKER, leg_character  # noqa: E402
+from mechchar.core.character import (  # noqa: E402
+    LEG_ATTACH,
+    LEG_MARKER,
+    biped_character,
+    leg_character,
+    leg_refs,
+)
 from mechchar.core.playback import Playback  # noqa: E402
+from mechchar.core.rig import MultiRig, SubSpec  # noqa: E402
 from mechchar.core.viewport import Viewport  # noqa: E402
 from mechchar.db.motion_db import (  # noqa: E402
     MotionDB,
@@ -38,7 +45,9 @@ PERIOD_S = 4.0  # segundos por ciclo
 FAMILY_LABELS = {"four_bar": "cuadrilátero", "geared_five_bar": "5-bar con engranajes"}
 
 
-SCENES = ("Curva libre", "Pierna de prueba")
+SCENES = ("Curva libre", "Pierna de prueba", "Bípedo")
+LEG_PREFIXES = ("l_", "r_")
+GAIT_PHASES = (0.0, 0.5)  # marcha alternada: una pierna medio ciclo detrás de la otra
 
 
 def family_label(name: str) -> str:
@@ -84,6 +93,8 @@ class MainWindow(Gtk.ApplicationWindow):
         self._updating_scale = False
         self.dbs: list[MotionDB] = list(dbs) if dbs else []  # una base por familia
         self.suggestions: list[Suggestion] = []  # los mejores candidatos de la base
+        self.biped = False  # escena «Bípedo»: el ajuste de una pierna se usa en las dos
+        self._updating_phase = False
 
         self.canvas = Canvas()
         self.canvas.overlay = self._draw_scene
@@ -137,9 +148,29 @@ class MainWindow(Gtk.ApplicationWindow):
         self.status.set_margin_start(8)
         self.status.set_margin_bottom(6)
 
+        # Control de desfase (un slider por pierna); solo se ve en la escena «Bípedo».
+        self.phase_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.phase_scales: list[Gtk.Scale] = []
+        for k, prefix in enumerate(LEG_PREFIXES):
+            label = Gtk.Label(label=f"Desfase {'izq.' if prefix == 'l_' else 'der.'}")
+            scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0.0, 1.0, 0.005)
+            scale.set_hexpand(True)
+            scale.set_draw_value(True)
+            scale.set_digits(2)
+            scale.add_mark(0.5, Gtk.PositionType.BOTTOM, None)
+            scale.set_sensitive(False)
+            scale.connect("value-changed", self._on_phase_changed, k)
+            self.phase_scales.append(scale)
+            self.phase_row.append(label)
+            self.phase_row.append(scale)
+        self.phase_row.set_margin_start(6)
+        self.phase_row.set_margin_end(6)
+        self.phase_row.set_visible(False)
+
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         root.append(self.canvas)
         root.append(controls)
+        root.append(self.phase_row)
         root.append(self.status)
         self.set_child(root)
 
@@ -209,6 +240,8 @@ class MainWindow(Gtk.ApplicationWindow):
             character = self.leg_families[0].character
             rest = character.build()[1]
             draw_character(cr, vp, character, rest, [LEG_ATTACH, LEG_MARKER])
+            if self.biped:  # el ajuste se hace sobre una pierna; el bípedo se arma al terminar
+                draw_character(cr, vp, biped_character(), biped_character().build()[1])
         self.editor.draw(cr, vp)
         if self.suggestions and self.progress is None:
             draw_candidates(cr, vp, [s.curve for s in self.suggestions])
@@ -272,6 +305,8 @@ class MainWindow(Gtk.ApplicationWindow):
             if result is not None
             else None
         )
+        if fb is not None and self.biped and result is not None:
+            fb = self._build_biped(result)
         if result is None or fb is None:
             self.status.set_text("No se encontró un mecanismo válido para esta curva.")
             return False
@@ -280,6 +315,8 @@ class MainWindow(Gtk.ApplicationWindow):
         for button in self.candidate_buttons:
             button.set_sensitive(False)
         self.playback = Playback(fb.asm, fb.state0, period=PERIOD_S)
+        if isinstance(fb, MultiRig):
+            self._apply_gait(fb)
         self.play_button.set_sensitive(True)
         self.play_button.set_label("Pausa")
         self.scale.set_sensitive(True)
@@ -291,6 +328,51 @@ class MainWindow(Gtk.ApplicationWindow):
         self._zoom_to_fit(fb)
         self.canvas.queue_draw()
         return False  # GLib.SOURCE_REMOVE
+
+    def _build_biped(self, result: FitResult) -> MultiRig | None:
+        """Usa el mecanismo ajustado a una pierna en las dos del bípedo (cada una con su propio
+        desfase). Los mecanismos son iguales, así que la unión es factible en reposo."""
+        base = self._family(result.family).base
+        specs = []
+        for prefix in LEG_PREFIXES:
+            built = base.build(result.params, result.variant)
+            mech = base.to_mechanism(result.params, result.variant)
+            if built is None or mech is None:
+                return None
+            attach, marker = leg_refs(prefix)
+            specs.append(SubSpec(prefix + "leg", built, mech, attach, marker))
+        try:
+            return MultiRig(biped_character(), specs)
+        except ValueError as exc:
+            self.status.set_text(f"No se pudo armar el bípedo: {exc}")
+            return None
+
+    def _apply_gait(self, rig: MultiRig) -> None:
+        """Marcha alternada de partida: aplica los desfases por defecto en los sliders."""
+        assert self.playback is not None
+        for k, phase in enumerate(GAIT_PHASES):
+            state, ok = rig.set_phase(k, phase, self.playback.state, self.playback.t)
+            if ok:
+                self.playback.state = state
+        self._updating_phase = True
+        for k, scale in enumerate(self.phase_scales):
+            scale.set_value(rig.phases[k])
+            scale.set_sensitive(True)
+        self._updating_phase = False
+
+    def _on_phase_changed(self, scale: Gtk.Scale, k: int) -> None:
+        pb, rig = self.playback, self.mech
+        if self._updating_phase or pb is None or not isinstance(rig, MultiRig):
+            return
+        state, ok = rig.set_phase(k, scale.get_value(), pb.state, pb.t)
+        if ok:
+            pb.state = state
+        else:
+            self.status.set_text("Ese desfase no se puede alcanzar sin saltar de configuración.")
+            self._updating_phase = True
+            scale.set_value(rig.phases[k])
+            self._updating_phase = False
+        self.canvas.queue_draw()
 
     def _zoom_to_fit(self, fb: Any) -> None:
         """Encuadra la spline y el mecanismo en todo su ciclo."""
@@ -309,15 +391,20 @@ class MainWindow(Gtk.ApplicationWindow):
         self.set_scene(dropdown.get_selected())
 
     def set_scene(self, index: int) -> None:
-        """0 = curva libre (mecanismo suelto); 1 = pierna de prueba con el marcador en el pie."""
+        """0 = curva libre; 1 = pierna de prueba con el marcador en el pie; 2 = bípedo (el ajuste de
+        una pierna se usa en las dos, con un desfase por pierna)."""
         self.mech, self.playback, self.progress = None, None, None
         self.path, self.suggestions = [], []
+        self.biped = index == 2
+        self.phase_row.set_visible(self.biped)
+        for scale in self.phase_scales:
+            scale.set_sensitive(False)
         self.play_button.set_sensitive(False)
         self.scale.set_sensitive(False)
         for button in self.candidate_buttons:
             button.set_sensitive(False)
         vp = self.canvas.viewport
-        if index == 1:
+        if index in (1, 2):
             leg = leg_character()
             self.leg_families = tuple(
                 CharacterFamily(base, leg, LEG_ATTACH, LEG_MARKER)
@@ -328,6 +415,7 @@ class MainWindow(Gtk.ApplicationWindow):
             self.status.set_text(
                 "Pierna de prueba: arrastrá la curva que debe dibujar la punta del pie "
                 "(punto rojo); el naranja es donde se une el mecanismo. Presioná «Ajustar»."
+                + (" Después, un slider de desfase por pierna." if index == 2 else "")
             )
         else:
             self.leg_families = ()

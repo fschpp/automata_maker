@@ -17,6 +17,8 @@ pytest && ruff check . && mypy mechchar
 - **Pierna de prueba:** el mecanismo se une a una pierna articulada (`mechchar/core/character.py`) y se
   ajusta para que la punta del pie dibuje la curva. Un personaje propio se define en JSON
   (`Character.save` / `Character.load`).
+- **Bípedo:** el ajuste de una pierna se usa en las dos (`mechchar/core/rig.py`), con marcha alternada de
+  partida y un slider de desfase por pierna; todas comparten el mismo motor.
 
 ## Scripts
 ```bash
@@ -26,6 +28,8 @@ python -m mechchar.db
 # prueba de humo de la ventana sin pantalla: candidatos de la base, arrastrar un punto, refinar
 # uno y ajustar (capturas en /tmp)
 GSK_RENDERER=cairo GDK_BACKEND=x11 PYTHONPATH=. xvfb-run -a python3 scripts/smoke_ui.py
+# escena «Bípedo»: ajusta una pierna, mueve el slider de desfase y dibuja a PNG (/tmp/shot_biped_*)
+GSK_RENDERER=cairo GDK_BACKEND=x11 PYTHONPATH=. xvfb-run -a python3 scripts/smoke_biped.py
 # gradiente por función implícita vs diferencias finitas (tiempo y error)
 PYTHONPATH=. python3 scripts/bench_gradient.py
 # base de movimientos: tiempo de consulta y calidad frente a Fréchet

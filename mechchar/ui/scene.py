@@ -9,6 +9,7 @@ import numpy as np
 from mechchar.core.assembly import world_point
 from mechchar.core.character import Character, PointRef, RiggedMechanism
 from mechchar.core.mechanisms import FourBar, GearedFiveBar
+from mechchar.core.rig import MultiRig
 from mechchar.core.viewport import Viewport
 
 LINK_COLOR = (0.15, 0.25, 0.45)
@@ -166,8 +167,27 @@ def draw_rigged(cr: Any, vp: Viewport, rig: RiggedMechanism, state: np.ndarray) 
     cr.fill()
 
 
+def draw_multirig(cr: Any, vp: Viewport, rig: MultiRig, state: np.ndarray) -> None:
+    """Personaje con todos sus mecanismos; el marcador de cada pierna en rojo y su punto de
+    actuación en naranja."""
+    draw_character(cr, vp, rig.character, state)
+    for k, sub in enumerate(rig.subs):
+        mech_state = rig.mech_state(state, k)
+        draw_mechanism(cr, vp, sub.mechanism, mech_state)
+        x, y = _screen(vp, sub.mechanism.tracer_world(mech_state))
+        cr.arc(x, y, 6.0, 0, 6.283185307179586)
+        cr.set_source_rgb(*ATTACH_COLOR)
+        cr.fill()
+        x, y = _screen(vp, rig.marker_world(state, k))
+        cr.arc(x, y, 6.0, 0, 6.283185307179586)
+        cr.set_source_rgb(*TRACER_COLOR)
+        cr.fill()
+
+
 def draw_mechanism(cr: Any, vp: Viewport, mech: Any, state: np.ndarray) -> None:
-    if isinstance(mech, RiggedMechanism):
+    if isinstance(mech, MultiRig):
+        draw_multirig(cr, vp, mech, state)
+    elif isinstance(mech, RiggedMechanism):
         draw_rigged(cr, vp, mech, state)
     elif isinstance(mech, GearedFiveBar):
         draw_five_bar(cr, vp, mech, state)

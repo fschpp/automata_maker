@@ -21,7 +21,7 @@ import numpy as np
 from mechchar.core.assembly import TWO_PI, Analysis, Assembly, Drive, Pin, world_point
 from mechchar.core.character import Character, PointRef
 
-REST_TOL = 1e-6  # un pasador mayor que esto en reposo es infactible
+REST_TOL = 1e-6  # residuo máximo en reposo para no tener que resolver la pose de t = 0
 MAX_PHASE_STEP = 0.02  # fracción de ciclo por paso de continuación
 
 
@@ -94,12 +94,17 @@ class MultiRig:
             )
         self.asm: Assembly = asm
         self.state0 = np.concatenate(states)
-        worst = float(np.max(np.abs(asm.residual(self.state0, 0.0))))
-        if worst > REST_TOL:
-            raise ValueError(
-                f"los pasadores no son factibles en reposo (residuo {worst:.2e}): el marcador "
-                "de cada mecanismo debe caer sobre su punto de actuación en t = 0"
-            )
+        if float(np.max(np.abs(asm.residual(self.state0, 0.0)))) > REST_TOL:
+            # Un mecanismo refinado no suele dejar su marcador exactamente sobre el punto de
+            # actuación con el personaje en reposo: la pose de t = 0 se resuelve (como hace la
+            # simulación de una sola pierna). Si no hay solución, la unión es infactible.
+            res = asm.solve(self.state0, 0.0)
+            if not res.ok:
+                raise ValueError(
+                    f"los pasadores no son factibles en t = 0 (residuo {res.residual_norm:.2e}): "
+                    "el mecanismo no alcanza su punto de actuación"
+                )
+            self.state0 = res.state
 
     # --- consulta ---------------------------------------------------------------------------
     @property
@@ -121,6 +126,13 @@ class MultiRig:
 
     def part_polygons(self, state: np.ndarray) -> list[np.ndarray]:
         return [self.character.part_polygon(state, i) for i in range(self.n_char)]
+
+    def outline_points(self, state: np.ndarray) -> np.ndarray:
+        """Todos los puntos del conjunto (personaje y mecanismos) para encuadrar la vista."""
+        pts = list(self.part_polygons(state))
+        for k, sub in enumerate(self.subs):
+            pts.append(np.asarray(sub.mechanism.outline_points(self.mech_state(state, k))))
+        return np.vstack(pts)
 
     # --- desfase ----------------------------------------------------------------------------
     def set_phase(

@@ -170,8 +170,30 @@ def test_rig_validation(leg_mechanism):
         MultiRig(ch, [])
     with pytest.raises(ValueError, match="mismo nombre"):
         MultiRig(ch, [specs[0], replace(specs[1], name=specs[0].name)])
-    far = replace(specs[1], attach=PointRef("r_shank", (0.0, -1.2)))  # no coincide con el marcador
-    with pytest.raises(ValueError, match="infactibles|factibles"):
+    far = replace(specs[1], attach=PointRef("r_shank", (6.0, -1.2)))  # fuera de su alcance
+    with pytest.raises(ValueError, match="no son factibles"):
         MultiRig(ch, [specs[0], far])
     with pytest.raises(KeyError):
         MultiRig(ch, [replace(specs[0], attach=PointRef("no_existe", (0.0, 0.0)))])
+
+
+def test_a_refined_mechanism_that_misses_the_attach_point_at_rest_gets_its_pose_solved(
+    leg_mechanism,
+):
+    p, variant = leg_mechanism
+    p = p.copy()
+    p[:2] += (0.05, -0.04)  # corre el mecanismo: el marcador ya no cae sobre el punto de actuación
+    specs = []
+    for prefix in ("l_", "r_"):
+        attach, marker = leg_refs(prefix)
+        specs.append(
+            SubSpec(prefix + "leg", FOUR_BAR.build(p, variant), FOUR_BAR.to_mechanism(p, variant),
+                    attach, marker)
+        )
+    rig = MultiRig(biped_character(), specs)
+    assert np.max(np.abs(rig.asm.residual(rig.state0, 0.0))) < 1e-8
+    unsolved = np.concatenate(
+        [biped_character().build()[1], specs[0].built.state0, specs[1].built.state0]
+    )
+    assert not np.allclose(rig.state0, unsolved)  # hubo que mover el personaje para cerrar
+    assert rig.analyze().dof == 0
