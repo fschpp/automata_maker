@@ -35,6 +35,7 @@ from mechchar.db.metric import (
 from mechchar.optim.curves import bbox_diag, chamfer_rms
 from mechchar.optim.families import family_by_name
 from mechchar.optim.fitcore import MAX_LINK_RATIO, Candidate, CandidateSource, Family, Variant
+from mechchar.optim.gearbox import POOL_FACTOR, Bounds, GearBox, filter_candidates, mechanism_bounds
 
 N_DENSE = 256  # puntos con los que se evalúa cada curva antes de normalizarla
 DB_VERSION = 1
@@ -261,7 +262,8 @@ def query(
 
 
 def make_candidate_source(dbs: Sequence[MotionDB], prescreen: int = 150) -> CandidateSource:
-    """Fuente de candidatos para ``fitcore.fit`` a partir de una base por familia."""
+    """Fuente de candidatos para ``fitcore.fit`` a partir de una base por familia. Si la familia
+    viene restringida a una caja de engranajes (``BoxedFamily``), descarta los que no caben."""
     by_family = {db.family: db for db in dbs}
 
     def source(family: Family, y: np.ndarray, n_keep: int) -> list[Candidate]:
@@ -269,11 +271,15 @@ def make_candidate_source(dbs: Sequence[MotionDB], prescreen: int = 150) -> Cand
         if db is None:
             return []
         size = bbox_diag(y)
+        box = getattr(family, "box", None)
+        k = n_keep * POOL_FACTOR if box is not None else n_keep
         cands = []
-        for m in query(db, y, k=n_keep, prescreen=prescreen):
+        for m in query(db, y, k=k, prescreen=max(prescreen, 2 * k)):
             v = db.variant(m.index)
             p0 = family.assemble(db.shape[m.index], v, m.scale, m.rotation, m.origin)
             cands.append(Candidate(p0, v, chamfer_rms(m.curve, y) / size, m.curve))
+        if box is not None:
+            cands = filter_candidates(getattr(family, "base", family), cands, box)[:n_keep]
         return cands
 
     return source
@@ -289,23 +295,36 @@ class Suggestion:
     curve: np.ndarray  # curva que traza (N_NORM, 2)
     distance: float  # métrica total contra la curva consultada
     rel_error: float  # error chamfer relativo al tamaño de la curva
+    bounds: Bounds | None = None  # rectángulo del mecanismo en todo su ciclo (caja delimitadora)
 
 
 def suggest(
-    dbs: Sequence[MotionDB], curve: np.ndarray, k: int = 3, prescreen: int = 150
+    dbs: Sequence[MotionDB],
+    curve: np.ndarray,
+    k: int = 3,
+    prescreen: int = 150,
+    box: GearBox | None = None,
 ) -> list[Suggestion]:
-    """Los ``k`` mejores candidatos entre todas las bases, ordenados por la métrica."""
+    """Los ``k`` mejores candidatos entre todas las bases, ordenados por la métrica. Con ``box``
+    se descartan los que no caben en la caja de engranajes."""
     y = np.asarray(curve, dtype=float)
     size = bbox_diag(y)
+    want = k * POOL_FACTOR if box is not None else k
     found: list[tuple[float, MotionDB, Match]] = []
     for db in dbs:
-        for m in query(db, y, k=k, prescreen=prescreen):
+        for m in query(db, y, k=want, prescreen=max(prescreen, 2 * want)):
             found.append((m.distance, db, m))
     found.sort(key=lambda item: item[0])
     out: list[Suggestion] = []
-    for _, db, m in found[:k]:
+    for _, db, m in found:
+        fam = family_by_name(db.family)
         v = db.variant(m.index)
-        p0 = family_by_name(db.family).assemble(db.shape[m.index], v, m.scale, m.rotation, m.origin)
+        p0 = fam.assemble(db.shape[m.index], v, m.scale, m.rotation, m.origin)
+        bounds = mechanism_bounds(fam, p0, v)
+        if box is not None and (bounds is None or not box.contains(bounds)):
+            continue
         rel = chamfer_rms(m.curve, y) / size
-        out.append(Suggestion(db.family, v, p0, m.curve, m.distance, rel))
+        out.append(Suggestion(db.family, v, p0, m.curve, m.distance, rel, bounds))
+        if len(out) == k:
+            break
     return out

@@ -29,7 +29,9 @@ from mechchar.db.motion_db import (  # noqa: E402
 from mechchar.optim.character_fit import CharacterFamily  # noqa: E402
 from mechchar.optim.families import ALL_FAMILIES, family_by_name, fit_best  # noqa: E402
 from mechchar.optim.fitcore import FitResult, Throttle, refine_from  # noqa: E402
+from mechchar.optim.gearbox import GearBox, box_families, mechanism_bounds  # noqa: E402
 from mechchar.optim.job import LatestJobRunner  # noqa: E402
+from mechchar.ui.box_editor import BoxEditor, draw_bounds  # noqa: E402
 from mechchar.ui.canvas import Canvas  # noqa: E402
 from mechchar.ui.scene import (  # noqa: E402
     CANDIDATE_COLORS,
@@ -95,12 +97,18 @@ class MainWindow(Gtk.ApplicationWindow):
         self.suggestions: list[Suggestion] = []  # los mejores candidatos de la base
         self.biped = False  # escena «Bípedo»: el ajuste de una pierna se usa en las dos
         self._updating_phase = False
+        self.box: GearBox | None = None  # caja de engranajes (None = sin límite)
+        self._fit_box: GearBox | None = None
+        self.mech_bounds: tuple[float, float, float, float] | None = None
 
         self.canvas = Canvas()
         self.canvas.overlay = self._draw_scene
         self.editor = SplineEditor(self.canvas.viewport)
         self.editor.on_change = self._on_spline_changed
         self.canvas.drag_target = self.editor
+        self.box_editor = BoxEditor(self.canvas.viewport)
+        self.box_editor.on_preview = lambda: self.canvas.queue_draw()
+        self.box_editor.on_change = self._on_box_changed
 
         self.runner = LatestJobRunner(
             self._fit_work,
@@ -108,7 +116,7 @@ class MainWindow(Gtk.ApplicationWindow):
         )
         # Consulta a la base mientras se arrastra: solo importa el último pedido.
         self.query_runner = LatestJobRunner(
-            lambda target: suggest(self.dbs, target),
+            lambda item: suggest(self.dbs, item[0], box=item[1]),
             lambda _item, result, error: GLib.idle_add(self._on_suggestions, result, error),
         )
 
@@ -125,6 +133,16 @@ class MainWindow(Gtk.ApplicationWindow):
             button.set_sensitive(False)
             button.connect("clicked", self._on_candidate_clicked, i)
             self.candidate_buttons.append(button)
+        self.box_toggle = Gtk.ToggleButton(label="Caja")
+        self.box_toggle.set_tooltip_text(
+            "Caja de engranajes: activala y arrastrá en el lienzo para dibujar el rectángulo "
+            "donde tiene que caber el mecanismo."
+        )
+        self.box_toggle.connect("toggled", self._on_box_toggled)
+        self.box_clear = Gtk.Button(label="✕")
+        self.box_clear.set_tooltip_text("Quitar la caja de engranajes")
+        self.box_clear.set_sensitive(False)
+        self.box_clear.connect("clicked", lambda _b: self.box_editor.clear())
         self.play_button = Gtk.Button(label="Pausa")
         self.play_button.connect("clicked", self._on_play_clicked)
         self.play_button.set_sensitive(False)
@@ -139,7 +157,10 @@ class MainWindow(Gtk.ApplicationWindow):
         self.status.set_xalign(0.0)
 
         controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        row = (self.scene_dropdown, self.fit_button, *self.candidate_buttons, self.play_button)
+        row = (
+            self.scene_dropdown, self.fit_button, self.box_toggle, self.box_clear,
+            *self.candidate_buttons, self.play_button,
+        )
         for widget in row:
             controls.append(widget)
         controls.append(self.scale)
@@ -205,7 +226,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _request_suggestions(self) -> bool:
         if self.dbs and not self.leg_families:
-            self.query_runner.submit(self.editor.curve(per_segment=24))
+            self.query_runner.submit((self.editor.curve(per_segment=24), self.box))
         return False
 
     def _on_suggestions(self, result: list[Suggestion] | None, error: BaseException | None) -> bool:
@@ -243,28 +264,37 @@ class MainWindow(Gtk.ApplicationWindow):
             if self.biped:  # el ajuste se hace sobre una pierna; el bípedo se arma al terminar
                 draw_character(cr, vp, biped_character(), biped_character().build()[1])
         self.editor.draw(cr, vp)
+        self.box_editor.draw(cr, vp)
         if self.suggestions and self.progress is None:
             draw_candidates(cr, vp, [s.curve for s in self.suggestions])
+            for i, s in enumerate(self.suggestions[: len(CANDIDATE_COLORS)]):
+                if s.bounds is not None:  # el rectángulo de cada candidato, como en el video
+                    draw_bounds(cr, vp, s.bounds, CANDIDATE_COLORS[i])
         if self.mech is not None and self.playback is not None:
             draw_path(cr, vp, self.path)
             draw_mechanism(cr, vp, self.mech, self.playback.state)
+            if self.mech_bounds is not None:
+                inside = self.box is None or self.box.contains(self.mech_bounds, self.box.slack)
+                draw_bounds(cr, vp, self.mech_bounds, (0.1, 0.55, 0.2), inside)
         if self.progress is not None:
             draw_progress_curve(cr, vp, self.progress)
 
     # --- ajuste --------------------------------------------------------
-    def _fit_work(self, item: tuple[np.ndarray, Suggestion | None]) -> FitResult | None:
+    def _fit_work(
+        self, item: tuple[np.ndarray, Suggestion | None, GearBox | None]
+    ) -> FitResult | None:
         """Hilo de trabajo: ajuste completo, o refinamiento del candidato elegido."""
-        target, chosen = item
+        target, chosen, box = item
         progress = Throttle(self._post_progress)
         if chosen is not None:
-            return refine_from(
-                family_by_name(chosen.family), chosen.p0, chosen.variant, target,
-                on_progress=progress,
-            )
+            fam = box_families((family_by_name(chosen.family),), box)[0]
+            return refine_from(fam, chosen.p0, chosen.variant, target, on_progress=progress)
         if self.leg_families:  # el personaje entra en la simulación; no usa la base de movimientos
-            return fit_best(target, self.leg_families, on_progress=progress)  # type: ignore[arg-type]
+            legs = box_families(self.leg_families, box)
+            return fit_best(target, legs, on_progress=progress)  # type: ignore[arg-type]
         source = make_candidate_source(self.dbs) if self.dbs else None
-        return fit_best(target, on_progress=progress, candidate_source=source)
+        families = box_families(ALL_FAMILIES, box)
+        return fit_best(target, families, on_progress=progress, candidate_source=source)
 
     def _on_fit_clicked(self, _button: Gtk.Button) -> None:
         if not self.runner.busy:
@@ -277,7 +307,8 @@ class MainWindow(Gtk.ApplicationWindow):
         what = "candidato elegido" if chosen is not None else "mecanismo"
         self.status.set_text(f"Ajustando {what}… (unos segundos)")
         self.progress = None
-        self.runner.submit((self.editor.curve(per_segment=24), chosen))
+        self._fit_box = self.box  # la caja con la que se pidió; dibujarla de nuevo no la cambia
+        self.runner.submit((self.editor.curve(per_segment=24), chosen, self.box))
 
     def _post_progress(self, label: str, curve: np.ndarray) -> None:
         """Llamado desde el hilo de trabajo: pasa la curva en evaluación al hilo principal."""
@@ -308,7 +339,13 @@ class MainWindow(Gtk.ApplicationWindow):
         if fb is not None and self.biped and result is not None:
             fb = self._build_biped(result)
         if result is None or fb is None:
-            self.status.set_text("No se encontró un mecanismo válido para esta curva.")
+            if self._fit_box is not None:
+                self.status.set_text(
+                    "No se encontró un mecanismo que quepa en la caja de engranajes: "
+                    "agrandala o achicá la curva."
+                )
+            else:
+                self.status.set_text("No se encontró un mecanismo válido para esta curva.")
             return False
         self.mech, self.path = fb, list(result.curve)
         self.suggestions = []  # ya se eligió: se despeja el lienzo hasta la próxima edición
@@ -322,8 +359,18 @@ class MainWindow(Gtk.ApplicationWindow):
         self.scale.set_sensitive(True)
         self._last_time = None
         pct = result.rms_rel * 100
+        fam = self._family(result.family)
+        self.mech_bounds = mechanism_bounds(fam, result.params, result.variant)
+        note = ""
+        box = self._fit_box
+        if box is not None and self.mech_bounds is not None:
+            out = box.worst_overshoot(self.mech_bounds)
+            note = (
+                " Cabe en la caja." if out <= box.slack
+                else f" Se sale de la caja por {out:.2f}: probá con una caja más grande."
+            )
         self.status.set_text(
-            f"Ajuste listo: {describe(result)}, error {pct:.1f} % del tamaño de la curva."
+            f"Ajuste listo: {describe(result)}, error {pct:.1f} % del tamaño de la curva.{note}"
         )
         self._zoom_to_fit(fb)
         self.canvas.queue_draw()
@@ -395,6 +442,7 @@ class MainWindow(Gtk.ApplicationWindow):
         una pierna se usa en las dos, con un desfase por pierna)."""
         self.mech, self.playback, self.progress = None, None, None
         self.path, self.suggestions = [], []
+        self.mech_bounds = None
         self.biped = index == 2
         self.phase_row.set_visible(self.biped)
         for scale in self.phase_scales:
@@ -430,9 +478,27 @@ class MainWindow(Gtk.ApplicationWindow):
         if self.leg_families:
             return
         if self.dbs and not self.runner.busy:
-            self.query_runner.submit(self.editor.curve(per_segment=24))
+            self.query_runner.submit((self.editor.curve(per_segment=24), self.box))
         elif self.mech is not None:
             self.status.set_text("Curva modificada: presioná «Ajustar» para recalcular.")
+
+    def _on_box_toggled(self, button: Gtk.ToggleButton) -> None:
+        """Con «Caja» activo, arrastrar en el lienzo dibuja la caja; si no, edita la curva."""
+        self.canvas.drag_target = self.box_editor if button.get_active() else self.editor
+
+    def _on_box_changed(self) -> None:
+        self.box = self.box_editor.box
+        self.box_clear.set_sensitive(self.box is not None)
+        if self.box is None:
+            self.status.set_text("Sin caja de engranajes.")
+        else:
+            self.status.set_text(
+                f"Caja de engranajes de {self.box.width:.1f} × {self.box.height:.1f}: "
+                "los candidatos y el ajuste tienen que caber adentro."
+            )
+        if self.dbs and not self.leg_families and not self.runner.busy:
+            self._request_suggestions()
+        self.canvas.queue_draw()
 
     # --- animación -----------------------------------------------------
     def _on_tick(self, _widget: Gtk.Widget, clock: Any) -> bool:

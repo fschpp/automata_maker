@@ -17,6 +17,8 @@ pytest && ruff check . && mypy mechchar
 - **Pierna de prueba:** el mecanismo se une a una pierna articulada (`mechchar/core/character.py`) y se
   ajusta para que la punta del pie dibuje la curva. Un personaje propio se define en JSON
   (`Character.save` / `Character.load`).
+- **Caja de engranajes:** el botón «Caja» dibuja el rectángulo donde tiene que caber el mecanismo; los
+  candidatos y el ajuste lo respetan (`mechchar/optim/gearbox.py`).
 - **Bípedo:** el ajuste de una pierna se usa en las dos (`mechchar/core/rig.py`), con marcha alternada de
   partida y un slider de desfase por pierna; todas comparten el mismo motor.
 
@@ -30,6 +32,8 @@ python -m mechchar.db
 GSK_RENDERER=cairo GDK_BACKEND=x11 PYTHONPATH=. xvfb-run -a python3 scripts/smoke_ui.py
 # escena «Bípedo»: ajusta una pierna, mueve el slider de desfase y dibuja a PNG (/tmp/shot_biped_*)
 GSK_RENDERER=cairo GDK_BACKEND=x11 PYTHONPATH=. xvfb-run -a python3 scripts/smoke_biped.py
+# caja de engranajes: la dibuja arrastrando, filtra candidatos y ajusta dentro (/tmp/shot_box_*)
+GSK_RENDERER=cairo GDK_BACKEND=x11 PYTHONPATH=. xvfb-run -a python3 scripts/smoke_box.py
 # gradiente por función implícita vs diferencias finitas (tiempo y error)
 PYTHONPATH=. python3 scripts/bench_gradient.py
 # base de movimientos: tiempo de consulta y calidad frente a Fréchet
