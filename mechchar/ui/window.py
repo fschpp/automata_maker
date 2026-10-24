@@ -9,7 +9,7 @@ import numpy as np
 gi.require_version("Gtk", "4.0")
 from gi.repository import GLib, Gtk  # noqa: E402
 
-from mechchar.core.mechanisms import Mechanism  # noqa: E402
+from mechchar.core.character import LEG_ATTACH, LEG_MARKER, leg_character  # noqa: E402
 from mechchar.core.playback import Playback  # noqa: E402
 from mechchar.core.viewport import Viewport  # noqa: E402
 from mechchar.db.motion_db import (  # noqa: E402
@@ -19,6 +19,7 @@ from mechchar.db.motion_db import (  # noqa: E402
     make_candidate_source,
     suggest,
 )
+from mechchar.optim.character_fit import CharacterFamily  # noqa: E402
 from mechchar.optim.families import ALL_FAMILIES, family_by_name, fit_best  # noqa: E402
 from mechchar.optim.fitcore import FitResult, Throttle, refine_from  # noqa: E402
 from mechchar.optim.job import LatestJobRunner  # noqa: E402
@@ -26,18 +27,29 @@ from mechchar.ui.canvas import Canvas  # noqa: E402
 from mechchar.ui.scene import (  # noqa: E402
     CANDIDATE_COLORS,
     draw_candidates,
+    draw_character,
     draw_mechanism,
     draw_path,
     draw_progress_curve,
 )
-from mechchar.ui.spline_editor import SplineEditor  # noqa: E402
+from mechchar.ui.spline_editor import SplineEditor, default_points  # noqa: E402
 
 PERIOD_S = 4.0  # segundos por ciclo
 FAMILY_LABELS = {"four_bar": "cuadrilátero", "geared_five_bar": "5-bar con engranajes"}
 
 
+SCENES = ("Curva libre", "Pierna de prueba")
+
+
+def family_label(name: str) -> str:
+    """Nombre legible de una familia; ``base+personaje`` se muestra como «base, con personaje»."""
+    base, _, extra = name.partition("+")
+    label = FAMILY_LABELS.get(base, base)
+    return f"{label}, con personaje" if extra else label
+
+
 def describe(result: FitResult) -> str:
-    label = FAMILY_LABELS.get(result.family, result.family)
+    label = family_label(result.family)
     if result.variant.ratio:
         label += f" (relación {result.variant.ratio:+.0f})"
     return label
@@ -47,7 +59,7 @@ COLOR_NAMES = ("rojo", "verde", "azul")
 
 
 def describe_suggestion(s: Suggestion) -> str:
-    label = FAMILY_LABELS.get(s.family, s.family)
+    label = family_label(s.family)
     if s.variant.ratio:
         label += f" (relación {s.variant.ratio:+.0f})"
     return label
@@ -63,7 +75,8 @@ class MainWindow(Gtk.ApplicationWindow):
         self.set_default_size(1000, 700)
 
         # Mecanismo ajustado (None hasta el primer ajuste).
-        self.mech: Mechanism | None = None
+        self.mech: Any = None
+        self.leg_families: tuple[CharacterFamily, ...] = ()  # vacío = escena de curva libre
         self.progress: np.ndarray | None = None  # curva en evaluación mientras se ajusta
         self.path: list[Any] = []
         self.playback: Playback | None = None
@@ -90,6 +103,8 @@ class MainWindow(Gtk.ApplicationWindow):
 
         self.fit_button = Gtk.Button(label="Ajustar mecanismo")
         self.fit_button.connect("clicked", self._on_fit_clicked)
+        self.scene_dropdown = Gtk.DropDown.new_from_strings(list(SCENES))
+        self.scene_dropdown.connect("notify::selected", self._on_scene_changed)
         self.candidate_buttons: list[Gtk.Button] = []
         for i, color in enumerate(CANDIDATE_COLORS):
             button = Gtk.Button()
@@ -113,7 +128,8 @@ class MainWindow(Gtk.ApplicationWindow):
         self.status.set_xalign(0.0)
 
         controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        for widget in (self.fit_button, *self.candidate_buttons, self.play_button):
+        row = (self.scene_dropdown, self.fit_button, *self.candidate_buttons, self.play_button)
+        for widget in row:
             controls.append(widget)
         controls.append(self.scale)
         for margin in ("start", "end", "top", "bottom"):
@@ -150,8 +166,14 @@ class MainWindow(Gtk.ApplicationWindow):
         self._request_suggestions()
         return False
 
+    def _family(self, name: str) -> Any:
+        for fam in self.leg_families:
+            if fam.name == name:
+                return fam
+        return family_by_name(name)
+
     def _request_suggestions(self) -> bool:
-        if self.dbs:
+        if self.dbs and not self.leg_families:
             self.query_runner.submit(self.editor.curve(per_segment=24))
         return False
 
@@ -183,6 +205,10 @@ class MainWindow(Gtk.ApplicationWindow):
 
     # --- dibujo --------------------------------------------------------
     def _draw_scene(self, cr: Any, vp: Viewport) -> None:
+        if self.leg_families and self.mech is None:
+            character = self.leg_families[0].character
+            rest = character.build()[1]
+            draw_character(cr, vp, character, rest, [LEG_ATTACH, LEG_MARKER])
         self.editor.draw(cr, vp)
         if self.suggestions and self.progress is None:
             draw_candidates(cr, vp, [s.curve for s in self.suggestions])
@@ -202,6 +228,8 @@ class MainWindow(Gtk.ApplicationWindow):
                 family_by_name(chosen.family), chosen.p0, chosen.variant, target,
                 on_progress=progress,
             )
+        if self.leg_families:  # el personaje entra en la simulación; no usa la base de movimientos
+            return fit_best(target, self.leg_families, on_progress=progress)  # type: ignore[arg-type]
         source = make_candidate_source(self.dbs) if self.dbs else None
         return fit_best(target, on_progress=progress, candidate_source=source)
 
@@ -240,7 +268,7 @@ class MainWindow(Gtk.ApplicationWindow):
             self.status.set_text(f"Error al ajustar: {error!r}")
             return False
         fb = (
-            family_by_name(result.family).to_mechanism(result.params, result.variant)
+            self._family(result.family).to_mechanism(result.params, result.variant)
             if result is not None
             else None
         )
@@ -264,7 +292,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.canvas.queue_draw()
         return False  # GLib.SOURCE_REMOVE
 
-    def _zoom_to_fit(self, fb: Mechanism) -> None:
+    def _zoom_to_fit(self, fb: Any) -> None:
         """Encuadra la spline y el mecanismo en todo su ciclo."""
         cycle = fb.asm.trace_cycle(fb.state0, n_steps=24, max_jump=1.0)
         pts = [self.editor.curve()] + [fb.outline_points(s) for s in cycle.states]
@@ -274,7 +302,45 @@ class MainWindow(Gtk.ApplicationWindow):
             lo[0], lo[1], hi[0], hi[1], self.canvas.get_width(), self.canvas.get_height()
         )
 
+    # --- escenas ---------------------------------------------------------
+    def _on_scene_changed(self, dropdown: Gtk.DropDown, _param: Any) -> None:
+        if self.runner.busy:
+            return
+        self.set_scene(dropdown.get_selected())
+
+    def set_scene(self, index: int) -> None:
+        """0 = curva libre (mecanismo suelto); 1 = pierna de prueba con el marcador en el pie."""
+        self.mech, self.playback, self.progress = None, None, None
+        self.path, self.suggestions = [], []
+        self.play_button.set_sensitive(False)
+        self.scale.set_sensitive(False)
+        for button in self.candidate_buttons:
+            button.set_sensitive(False)
+        vp = self.canvas.viewport
+        if index == 1:
+            leg = leg_character()
+            self.leg_families = tuple(
+                CharacterFamily(base, leg, LEG_ATTACH, LEG_MARKER)
+                for base in ALL_FAMILIES
+            )
+            self.editor.points = default_points(8, 0.55, 0.25, (0.9, -2.4))
+            vp.fit_bounds(-1.5, -3.2, 2.5, 0.6, self.canvas.get_width(), self.canvas.get_height())
+            self.status.set_text(
+                "Pierna de prueba: arrastrá la curva que debe dibujar la punta del pie "
+                "(punto rojo); el naranja es donde se une el mecanismo. Presioná «Ajustar»."
+            )
+        else:
+            self.leg_families = ()
+            self.editor.points = default_points()
+            w, h = self.canvas.get_width(), self.canvas.get_height()
+            vp.scale, vp.ox, vp.oy = 50.0, w * 0.3, h / 2
+            self.status.set_text("Arrastrá los puntos azules y presioná «Ajustar».")
+            self._request_suggestions()
+        self.canvas.queue_draw()
+
     def _on_spline_changed(self) -> None:
+        if self.leg_families:
+            return
         if self.dbs and not self.runner.busy:
             self.query_runner.submit(self.editor.curve(per_segment=24))
         elif self.mech is not None:

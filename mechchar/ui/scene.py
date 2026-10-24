@@ -6,7 +6,9 @@ from typing import Any
 
 import numpy as np
 
-from mechchar.core.mechanisms import FourBar, GearedFiveBar, Mechanism
+from mechchar.core.assembly import world_point
+from mechchar.core.character import Character, PointRef, RiggedMechanism
+from mechchar.core.mechanisms import FourBar, GearedFiveBar
 from mechchar.core.viewport import Viewport
 
 LINK_COLOR = (0.15, 0.25, 0.45)
@@ -111,8 +113,63 @@ def draw_five_bar(cr: Any, vp: Viewport, fb: GearedFiveBar, state: np.ndarray) -
     cr.fill()
 
 
-def draw_mechanism(cr: Any, vp: Viewport, mech: Mechanism, state: np.ndarray) -> None:
-    if isinstance(mech, GearedFiveBar):
+PART_FILL = (0.86, 0.88, 0.92)
+FIXED_FILL = (0.62, 0.64, 0.70)
+PART_EDGE = (0.30, 0.33, 0.42)
+ATTACH_COLOR = (0.95, 0.65, 0.10)
+
+
+def _polygon(cr: Any, vp: Viewport, poly: np.ndarray, fill: tuple, edge: tuple) -> None:
+    cr.move_to(*_screen(vp, poly[0]))
+    for p in poly[1:]:
+        cr.line_to(*_screen(vp, p))
+    cr.close_path()
+    cr.set_source_rgb(*fill)
+    cr.fill_preserve()
+    cr.set_source_rgb(*edge)
+    cr.set_line_width(1.5)
+    cr.stroke()
+
+
+def draw_character(
+    cr: Any,
+    vp: Viewport,
+    character: Character,
+    state: np.ndarray,
+    marks: list[PointRef] | None = None,
+) -> None:
+    """Piezas del personaje (las fijas, más oscuras) y, si se pide, sus puntos marcados:
+    naranja el punto de actuación (primero) y rojo el marcador de la curva (segundo)."""
+    for i, part in enumerate(character.parts):
+        poly = character.part_polygon(state, i)
+        _polygon(cr, vp, poly, FIXED_FILL if part.fixed else PART_FILL, PART_EDGE)
+    for ref, color in zip(marks or [], (ATTACH_COLOR, TRACER_COLOR), strict=False):
+        i = character.index(ref.part)
+        x, y = _screen(vp, world_point(state, i, character.local_point(ref.part, ref.point)))
+        cr.arc(x, y, 6.0, 0, 6.283185307179586)
+        cr.set_source_rgb(*color)
+        cr.fill()
+
+
+def draw_rigged(cr: Any, vp: Viewport, rig: RiggedMechanism, state: np.ndarray) -> None:
+    draw_character(cr, vp, rig.character, state)
+    mech_state = rig.mech_state(state)
+    draw_mechanism(cr, vp, rig.base, mech_state)
+    # el marcador del mecanismo es el punto de actuación (naranja); el rojo es el del personaje
+    x, y = _screen(vp, rig.base.tracer_world(mech_state))
+    cr.arc(x, y, 6.0, 0, 6.283185307179586)
+    cr.set_source_rgb(*ATTACH_COLOR)
+    cr.fill()
+    x, y = _screen(vp, rig.marker_world(state))
+    cr.arc(x, y, 6.0, 0, 6.283185307179586)
+    cr.set_source_rgb(*TRACER_COLOR)
+    cr.fill()
+
+
+def draw_mechanism(cr: Any, vp: Viewport, mech: Any, state: np.ndarray) -> None:
+    if isinstance(mech, RiggedMechanism):
+        draw_rigged(cr, vp, mech, state)
+    elif isinstance(mech, GearedFiveBar):
         draw_five_bar(cr, vp, mech, state)
     else:
         draw_four_bar(cr, vp, mech, state)

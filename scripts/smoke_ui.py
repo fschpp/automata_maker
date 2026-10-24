@@ -88,6 +88,30 @@ def on_activate(app):
         pb = win.playback
         print("animación ok:", pb is not None and pb.ok, "| fase:", round(pb.t, 3) if pb else None)
         snap(win, "/tmp/shot_3_ajustar.png")
+        win.scene_dropdown.set_selected(1)  # escena de la pierna de prueba
+        GLib.timeout_add(700, leg_scene)
+        return False
+
+    def leg_scene():
+        assert win.leg_families, "no se activó la escena de la pierna"
+        snap(win, "/tmp/shot_4_pierna_reposo.png")
+        win.fit_button.emit("clicked")
+        st["t0"] = time.time()
+        GLib.timeout_add(500, poll_leg)
+        return False
+
+    def poll_leg():
+        return wait_idle(finish_leg, "ajuste de la pierna")
+
+    def finish_leg():
+        pb = win.playback
+        print("pierna: mecanismo con personaje:", type(win.mech).__name__,
+              "| animación ok:", pb is not None and pb.ok)
+        GLib.timeout_add(800, final_snap)
+        return False
+
+    def final_snap():
+        snap(win, "/tmp/shot_5_pierna_ajustada.png")
         app.quit()
         return False
 

@@ -16,11 +16,12 @@ CURVE_COLOR = (0.1, 0.1, 0.1)
 POINT_COLOR = (0.15, 0.45, 0.85)
 
 
-def default_points(n: int = 8, a: float = 3.0, b: float = 1.5) -> list[tuple[float, float]]:
+def default_points(
+    n: int = 8, a: float = 3.0, b: float = 1.5, center: tuple[float, float] = (0.0, 0.0)
+) -> list[tuple[float, float]]:
     """Puntos de control iniciales sobre una elipse."""
-    return [
-        (a * math.cos(2 * math.pi * k / n), b * math.sin(2 * math.pi * k / n)) for k in range(n)
-    ]
+    angles = [2 * math.pi * k / n for k in range(n)]
+    return [(center[0] + a * math.cos(t), center[1] + b * math.sin(t)) for t in angles]
 
 
 class SplineEditor:
