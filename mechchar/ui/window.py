@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import threading
+from collections.abc import Sequence
 from typing import Any
 
 import gi
@@ -17,6 +19,13 @@ from mechchar.core.character import (  # noqa: E402
     leg_refs,
 )
 from mechchar.core.playback import Playback  # noqa: E402
+from mechchar.core.project import (  # noqa: E402
+    FitRecord,
+    History,
+    ProjectState,
+    load_project,
+    save_project,
+)
 from mechchar.core.rig import MultiRig, SubSpec  # noqa: E402
 from mechchar.core.viewport import Viewport  # noqa: E402
 from mechchar.db.motion_db import (  # noqa: E402
@@ -28,7 +37,13 @@ from mechchar.db.motion_db import (  # noqa: E402
 )
 from mechchar.optim.character_fit import CharacterFamily  # noqa: E402
 from mechchar.optim.families import ALL_FAMILIES, family_by_name, fit_best  # noqa: E402
-from mechchar.optim.fitcore import FitResult, Throttle, refine_from  # noqa: E402
+from mechchar.optim.fitcore import (  # noqa: E402
+    FitResult,
+    Throttle,
+    Variant,
+    refine_from,
+    trace_curve_generic,
+)
 from mechchar.optim.gearbox import GearBox, box_families, mechanism_bounds  # noqa: E402
 from mechchar.optim.job import LatestJobRunner  # noqa: E402
 from mechchar.ui.box_editor import BoxEditor, draw_bounds  # noqa: E402
@@ -99,12 +114,16 @@ class MainWindow(Gtk.ApplicationWindow):
         self._updating_phase = False
         self.box: GearBox | None = None  # caja de engranajes (None = sin límite)
         self._fit_box: GearBox | None = None
+        self.fit_result: FitResult | None = None  # el ajuste que se está mostrando
+        self._restoring = False  # mientras se restaura una foto no se registran cambios
+        self.current_file: str | None = None
         self.mech_bounds: tuple[float, float, float, float] | None = None
 
         self.canvas = Canvas()
         self.canvas.overlay = self._draw_scene
         self.editor = SplineEditor(self.canvas.viewport)
         self.editor.on_change = self._on_spline_changed
+        self.editor.on_commit = lambda: self._commit()
         self.canvas.drag_target = self.editor
         self.box_editor = BoxEditor(self.canvas.viewport)
         self.box_editor.on_preview = lambda: self.canvas.queue_draw()
@@ -194,6 +213,40 @@ class MainWindow(Gtk.ApplicationWindow):
         root.append(self.phase_row)
         root.append(self.status)
         self.set_child(root)
+
+        # Barra de título con proyecto (abrir / guardar) y deshacer / rehacer.
+        header = Gtk.HeaderBar()
+        self.open_button = Gtk.Button(label="Abrir")
+        self.open_button.set_tooltip_text("Abrir un proyecto (Ctrl+O)")
+        self.open_button.connect("clicked", lambda _b: self._on_open())
+        self.save_button = Gtk.Button(label="Guardar")
+        self.save_button.set_tooltip_text("Guardar el proyecto (Ctrl+S)")
+        self.save_button.connect("clicked", lambda _b: self._on_save())
+        self.undo_button = Gtk.Button(label="↶")
+        self.undo_button.set_tooltip_text("Deshacer (Ctrl+Z)")
+        self.undo_button.connect("clicked", lambda _b: self._undo())
+        self.redo_button = Gtk.Button(label="↷")
+        self.redo_button.set_tooltip_text("Rehacer (Ctrl+Mayús+Z o Ctrl+Y)")
+        self.redo_button.connect("clicked", lambda _b: self._redo())
+        for widget in (self.open_button, self.save_button, self.undo_button, self.redo_button):
+            header.pack_start(widget)
+        self.set_titlebar(header)
+        shortcuts = Gtk.ShortcutController()
+        shortcuts.set_scope(Gtk.ShortcutScope.GLOBAL)
+        for keys, action in (
+            ("<Control>z", self._undo), ("<Control><Shift>z", self._redo),
+            ("<Control>y", self._redo), ("<Control>s", self._on_save),
+            ("<Control>o", self._on_open),
+        ):
+            shortcuts.add_shortcut(
+                Gtk.Shortcut.new(
+                    Gtk.ShortcutTrigger.parse_string(keys),
+                    Gtk.CallbackAction.new(lambda _w, _a, fn=action: bool(fn() or True)),
+                )
+            )
+        self.add_controller(shortcuts)
+        self.history: History[ProjectState] = History(self._snapshot())
+        self._update_history_buttons()
 
         self.add_tick_callback(self._on_tick)
 
@@ -347,20 +400,8 @@ class MainWindow(Gtk.ApplicationWindow):
             else:
                 self.status.set_text("No se encontró un mecanismo válido para esta curva.")
             return False
-        self.mech, self.path = fb, list(result.curve)
-        self.suggestions = []  # ya se eligió: se despeja el lienzo hasta la próxima edición
-        for button in self.candidate_buttons:
-            button.set_sensitive(False)
-        self.playback = Playback(fb.asm, fb.state0, period=PERIOD_S)
-        if isinstance(fb, MultiRig):
-            self._apply_gait(fb)
-        self.play_button.set_sensitive(True)
-        self.play_button.set_label("Pausa")
-        self.scale.set_sensitive(True)
-        self._last_time = None
+        self._show_result(result, fb)
         pct = result.rms_rel * 100
-        fam = self._family(result.family)
-        self.mech_bounds = mechanism_bounds(fam, result.params, result.variant)
         note = ""
         box = self._fit_box
         if box is not None and self.mech_bounds is not None:
@@ -373,8 +414,27 @@ class MainWindow(Gtk.ApplicationWindow):
             f"Ajuste listo: {describe(result)}, error {pct:.1f} % del tamaño de la curva.{note}"
         )
         self._zoom_to_fit(fb)
+        self._commit()
         self.canvas.queue_draw()
         return False  # GLib.SOURCE_REMOVE
+
+    def _show_result(
+        self, result: FitResult, fb: Any, phases: Sequence[float] = GAIT_PHASES
+    ) -> None:
+        """Muestra un mecanismo ajustado y deja la reproducción lista."""
+        self.mech, self.path, self.fit_result = fb, list(result.curve), result
+        self.suggestions = []  # ya se eligió: se despeja el lienzo hasta la próxima edición
+        for button in self.candidate_buttons:
+            button.set_sensitive(False)
+        self.playback = Playback(fb.asm, fb.state0, period=PERIOD_S)
+        if isinstance(fb, MultiRig):
+            self._apply_gait(fb, phases)
+        self.play_button.set_sensitive(True)
+        self.play_button.set_label("Pausa")
+        self.scale.set_sensitive(True)
+        self._last_time = None
+        fam = self._family(result.family)
+        self.mech_bounds = mechanism_bounds(fam, result.params, result.variant)
 
     def _build_biped(self, result: FitResult) -> MultiRig | None:
         """Usa el mecanismo ajustado a una pierna en las dos del bípedo (cada una con su propio
@@ -394,10 +454,10 @@ class MainWindow(Gtk.ApplicationWindow):
             self.status.set_text(f"No se pudo armar el bípedo: {exc}")
             return None
 
-    def _apply_gait(self, rig: MultiRig) -> None:
-        """Marcha alternada de partida: aplica los desfases por defecto en los sliders."""
+    def _apply_gait(self, rig: MultiRig, phases: Sequence[float] = GAIT_PHASES) -> None:
+        """Aplica los desfases (por defecto, la marcha alternada) y los pone en los sliders."""
         assert self.playback is not None
-        for k, phase in enumerate(GAIT_PHASES):
+        for k, phase in enumerate(phases[: len(rig.subs)]):
             state, ok = rig.set_phase(k, phase, self.playback.state, self.playback.t)
             if ok:
                 self.playback.state = state
@@ -419,6 +479,7 @@ class MainWindow(Gtk.ApplicationWindow):
             self._updating_phase = True
             scale.set_value(rig.phases[k])
             self._updating_phase = False
+        self._commit(key=f"fase{k}")
         self.canvas.queue_draw()
 
     def _zoom_to_fit(self, fb: Any) -> None:
@@ -433,24 +494,29 @@ class MainWindow(Gtk.ApplicationWindow):
 
     # --- escenas ---------------------------------------------------------
     def _on_scene_changed(self, dropdown: Gtk.DropDown, _param: Any) -> None:
-        if self.runner.busy:
+        if self.runner.busy or self._restoring:
             return
         self.set_scene(dropdown.get_selected())
+        self._commit()
 
-    def set_scene(self, index: int) -> None:
-        """0 = curva libre; 1 = pierna de prueba con el marcador en el pie; 2 = bípedo (el ajuste de
-        una pierna se usa en las dos, con un desfase por pierna)."""
-        self.mech, self.playback, self.progress = None, None, None
+    def _clear_result(self) -> None:
+        """Quita el mecanismo mostrado (y su reproducción) sin tocar la curva ni la caja."""
+        self.mech, self.playback, self.progress, self.fit_result = None, None, None, None
         self.path, self.suggestions = [], []
         self.mech_bounds = None
-        self.biped = index == 2
-        self.phase_row.set_visible(self.biped)
         for scale in self.phase_scales:
             scale.set_sensitive(False)
         self.play_button.set_sensitive(False)
         self.scale.set_sensitive(False)
         for button in self.candidate_buttons:
             button.set_sensitive(False)
+
+    def set_scene(self, index: int) -> None:
+        """0 = curva libre; 1 = pierna de prueba con el marcador en el pie; 2 = bípedo (el ajuste de
+        una pierna se usa en las dos, con un desfase por pierna)."""
+        self._clear_result()
+        self.biped = index == 2
+        self.phase_row.set_visible(self.biped)
         vp = self.canvas.viewport
         if index in (1, 2):
             leg = leg_character()
@@ -482,6 +548,160 @@ class MainWindow(Gtk.ApplicationWindow):
         elif self.mech is not None:
             self.status.set_text("Curva modificada: presioná «Ajustar» para recalcular.")
 
+    # --- proyecto e historial --------------------------------------------
+    def _snapshot(self) -> ProjectState:
+        """Foto de todo lo que el usuario edita."""
+        fit = None
+        if self.mech is not None and self.fit_result is not None:
+            r = self.fit_result
+            fit = FitRecord(
+                r.family, tuple(float(v) for v in r.params), r.variant.branch, r.variant.ratio,
+                float(r.rms_rel),
+            )
+        phases = tuple(self.mech.phases) if isinstance(self.mech, MultiRig) else ()
+        b = self.box
+        return ProjectState(
+            int(self.scene_dropdown.get_selected()),
+            tuple((float(x), float(y)) for x, y in self.editor.points),
+            None if b is None else (b.x0, b.y0, b.x1, b.y1),
+            fit,
+            phases,
+        )
+
+    def _commit(self, key: str | None = None) -> None:
+        if self._restoring:
+            return
+        self.history.commit(self._snapshot(), key)
+        self._update_history_buttons()
+
+    def _update_history_buttons(self) -> None:
+        self.undo_button.set_sensitive(self.history.can_undo)
+        self.redo_button.set_sensitive(self.history.can_redo)
+
+    def _undo(self) -> None:
+        self._step_history(self.history.undo)
+
+    def _redo(self) -> None:
+        self._step_history(self.history.redo)
+
+    def _step_history(self, step: Any) -> None:
+        if self.runner.busy:
+            self.status.set_text("Esperá a que termine el ajuste para deshacer o rehacer.")
+            return
+        state = step()
+        if state is not None:
+            self._restore(state)
+        self._update_history_buttons()
+
+    def _restore(self, state: ProjectState, zoom: bool = False) -> None:
+        """Lleva la ventana a la foto ``state`` (sin registrar un cambio nuevo)."""
+        self._restoring = True
+        try:
+            if state.scene != self.scene_dropdown.get_selected():
+                self.scene_dropdown.set_selected(state.scene)
+                self.set_scene(state.scene)
+            else:
+                self._clear_result()
+            self.editor.points = list(state.spline)
+            b = state.box
+            self.box_editor.box = None if b is None else GearBox(*b)
+            self.box = self.box_editor.box
+            self.box_clear.set_sensitive(self.box is not None)
+            if state.fit is None:
+                self.status.set_text("Estado restaurado.")
+                self._request_suggestions()
+            else:
+                self._restore_fit(state, zoom)
+        finally:
+            self._restoring = False
+        self.canvas.queue_draw()
+
+    def _restore_fit(self, state: ProjectState, zoom: bool) -> None:
+        """Vuelve a armar el mecanismo guardado desde sus parámetros."""
+        rec = state.fit
+        assert rec is not None
+        try:
+            fam = self._family(rec.family)
+        except KeyError:
+            self.status.set_text(f"El proyecto usa una familia desconocida: {rec.family}.")
+            return
+        variant = Variant(rec.branch, rec.ratio)
+        params = np.array(rec.params, dtype=float)
+        if len(params) != fam.n_params:
+            self.status.set_text("Los parámetros guardados no corresponden a esa familia.")
+            return
+        curve = trace_curve_generic(lambda p: fam.build(p, variant), params, 180)
+        fb = fam.to_mechanism(params, variant)
+        if curve is None or fb is None:
+            self.status.set_text("No se pudo reconstruir el mecanismo guardado.")
+            return
+        result = FitResult(rec.family, params, variant, 0.0, rec.rms_rel, curve, rec.rms_rel)
+        if self.biped:
+            fb = self._build_biped(result)
+            if fb is None:
+                return
+        self._show_result(result, fb, state.phases or GAIT_PHASES)
+        self.status.set_text(
+            f"Estado restaurado: {describe(result)}, error {rec.rms_rel * 100:.1f} %."
+        )
+        if zoom:
+            self._zoom_to_fit(fb)
+
+    def _on_save(self) -> None:
+        dialog = Gtk.FileDialog()
+        dialog.set_title("Guardar proyecto")
+        dialog.set_initial_name(
+            os.path.basename(self.current_file) if self.current_file else "proyecto.json"
+        )
+        dialog.save(self, None, self._on_save_chosen)
+
+    def _on_save_chosen(self, dialog: Gtk.FileDialog, result: Any) -> None:
+        try:
+            path = dialog.save_finish(result).get_path()
+        except GLib.Error:
+            return  # canceló
+        self.save_to(path)
+
+    def save_to(self, path: str) -> bool:
+        try:
+            save_project(path, self._snapshot())
+        except OSError as exc:
+            self.status.set_text(f"No se pudo guardar: {exc.strerror or exc}")
+            return False
+        self.current_file = path
+        self.set_title(f"Mechanical Characters Designer — {os.path.basename(path)}")
+        self.status.set_text(f"Proyecto guardado en {path}.")
+        return True
+
+    def _on_open(self) -> None:
+        if self.runner.busy:
+            self.status.set_text("Esperá a que termine el ajuste para abrir un proyecto.")
+            return
+        dialog = Gtk.FileDialog()
+        dialog.set_title("Abrir proyecto")
+        dialog.open(self, None, self._on_open_chosen)
+
+    def _on_open_chosen(self, dialog: Gtk.FileDialog, result: Any) -> None:
+        try:
+            path = dialog.open_finish(result).get_path()
+        except GLib.Error:
+            return  # canceló
+        self.open_from(path)
+
+    def open_from(self, path: str) -> bool:
+        """Abre un proyecto; si el archivo no sirve deja todo como estaba y lo avisa."""
+        try:
+            state = load_project(path)
+        except (OSError, ValueError) as exc:
+            self.status.set_text(f"No se pudo abrir el proyecto: {exc}")
+            return False
+        self._restore(state, zoom=True)
+        self.history.reset(self._snapshot())
+        self._update_history_buttons()
+        self.current_file = path
+        self.set_title(f"Mechanical Characters Designer — {os.path.basename(path)}")
+        return True
+
     def _on_box_toggled(self, button: Gtk.ToggleButton) -> None:
         """Con «Caja» activo, arrastrar en el lienzo dibuja la caja; si no, edita la curva."""
         self.canvas.drag_target = self.box_editor if button.get_active() else self.editor
@@ -498,6 +718,7 @@ class MainWindow(Gtk.ApplicationWindow):
             )
         if self.dbs and not self.leg_families and not self.runner.busy:
             self._request_suggestions()
+        self._commit()
         self.canvas.queue_draw()
 
     # --- animación -----------------------------------------------------

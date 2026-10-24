@@ -32,7 +32,9 @@ class SplineEditor:
         self.vp = viewport
         self.points = list(points) if points is not None else default_points()
         self.on_change: Callable[[], None] | None = None
+        self.on_commit: Callable[[], None] | None = None  # al soltar un punto movido
         self._active: int | None = None
+        self._moved = False
 
     def curve(self, per_segment: int = 16) -> np.ndarray:
         return closed_catmull_rom(np.array(self.points), per_segment)
@@ -46,11 +48,15 @@ class SplineEditor:
         if self._active is None:
             return
         self.points[self._active] = self.vp.screen_to_world(sx, sy)
+        self._moved = True
         if self.on_change is not None:
             self.on_change()
 
     def drag_end(self) -> None:
         self._active = None
+        moved, self._moved = self._moved, False
+        if moved and self.on_commit is not None:
+            self.on_commit()
 
     # --- dibujo ---------------------------------------------------------
     def draw(self, cr: Any, vp: Viewport) -> None:
