@@ -12,6 +12,12 @@ python -m mechchar          # abre la ventana (rueda = zoom, arrastrar = pan)
 pytest && ruff check . && mypy mechchar
 ```
 
+## Escenas de la ventana
+- **Curva libre:** arrastrá la curva y ajustá un mecanismo suelto (candidatos instantáneos de la base).
+- **Pierna de prueba:** el mecanismo se une a una pierna articulada (`mechchar/core/character.py`) y se
+  ajusta para que la punta del pie dibuje la curva. Un personaje propio se define en JSON
+  (`Character.save` / `Character.load`).
+
 ## Scripts
 ```bash
 # precalcula las bases de movimientos con todos los núcleos (si no, la app las construye la
