@@ -18,6 +18,7 @@ que si un punto no es alcanzable la pose sigue siendo válida y el error queda e
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import NamedTuple
 
 import numpy as np
@@ -78,9 +79,7 @@ def _least_squares(
             rows.append(block)
         return np.vstack(rows)
 
-    return least_squares(
-        residual, state, jac=jacobian, xtol=1e-12, ftol=1e-12, gtol=1e-12
-    ).x
+    return least_squares(residual, state, jac=jacobian, xtol=1e-12, ftol=1e-12, gtol=1e-12).x
 
 
 def solve_pose(
@@ -99,9 +98,9 @@ def solve_pose(
     return state, _pose_error(asm, state, items)
 
 
-def track_marker(
+def _track(
     character: Character, marker: PointRef, curve: np.ndarray
-) -> tuple[np.ndarray, float]:
+) -> tuple[np.ndarray, np.ndarray]:
     """Poses del personaje con su ``marker`` sobre cada punto de ``curve`` (n, 2), por
     continuación desde el reposo: (estados (n, n_vars), peor distancia del marcador a la curva).
 
@@ -115,12 +114,48 @@ def track_marker(
     for a in np.linspace(0.0, 1.0, APPROACH_STEPS + 1)[1:]:
         state, _ = solve_pose(character, [(marker, start * (1.0 - a) + curve[0] * a)], state)
     states = np.empty((len(curve), state.size))
-    worst = 0.0
+    dists = np.empty(len(curve))
     for k, goal in enumerate(curve):
         state, _ = solve_pose(character, [(marker, goal)], state)
         states[k] = state
-        worst = max(worst, float(np.linalg.norm(world_point(state, comp, local) - goal)))
-    return states, worst
+        dists[k] = np.linalg.norm(world_point(state, comp, local) - goal)
+    return states, dists
+
+
+def track_marker(
+    character: Character, marker: PointRef, curve: np.ndarray
+) -> tuple[np.ndarray, float]:
+    """Poses del personaje con su ``marker`` sobre cada punto de ``curve`` (n, 2), por
+    continuación desde el reposo: (estados (n, n_vars), peor distancia del marcador a la curva).
+
+    Si parte de la curva no es alcanzable las poses siguen siendo válidas y se acercan lo más
+    posible; el segundo valor mide cuánto falta en el peor punto."""
+    states, dists = _track(character, marker, curve)
+    return states, float(dists.max()) if len(dists) else 0.0
+
+
+REACH_TOL_REL = 1e-3  # fracción del tamaño de la curva que se tolera al decir que "alcanza"
+
+
+@dataclass(frozen=True)
+class ReachReport:
+    """Qué parte de una curva puede recorrer un punto del personaje."""
+
+    n_points: int
+    n_outside: int  # puntos a más de REACH_TOL_REL del tamaño de la curva de donde llega
+    worst: float  # peor distancia (unidades de la escena)
+
+    @property
+    def ok(self) -> bool:
+        return self.n_outside == 0
+
+
+def reach_report(character: Character, marker: PointRef, curve: np.ndarray) -> ReachReport:
+    """Cuánto de ``curve`` (n, 2) alcanza ``marker``: ver ``ReachReport``."""
+    _, dists = _track(character, marker, curve)
+    size = float(np.hypot(*(curve.max(axis=0) - curve.min(axis=0))))
+    outside = int(np.count_nonzero(dists > REACH_TOL_REL * size))
+    return ReachReport(len(curve), outside, float(dists.max()) if len(dists) else 0.0)
 
 
 def point_curve(character: Character, ref: PointRef, states: np.ndarray) -> np.ndarray:

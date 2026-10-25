@@ -19,6 +19,7 @@ from mechchar.core.actuation import (  # noqa: E402
 )
 from mechchar.core.character import (  # noqa: E402
     LEG_ATTACH,
+    LEG_DEFAULT_ELLIPSE,
     LEG_MARKER,
     PointRef,
     biped_character,
@@ -26,6 +27,7 @@ from mechchar.core.character import (  # noqa: E402
     leg_refs,
     prefix_pose,
 )
+from mechchar.core.kinematics import ReachReport, reach_report  # noqa: E402
 from mechchar.core.playback import Playback  # noqa: E402
 from mechchar.core.project import (  # noqa: E402
     FitRecord,
@@ -141,7 +143,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.canvas.overlay = self._draw_scene
         self.editor = SplineEditor(self.canvas.viewport)
         self.editor.on_change = self._on_spline_changed
-        self.editor.on_commit = lambda: self._commit()
+        self.editor.on_commit = lambda: self._commit()  # _commit también revisa el alcance
         self.canvas.drag_target = self.editor
         self.box_editor = BoxEditor(self.canvas.viewport)
         self.box_editor.on_preview = lambda: self.canvas.queue_draw()
@@ -158,6 +160,13 @@ class MainWindow(Gtk.ApplicationWindow):
         self.query_runner = LatestJobRunner(
             lambda item: suggest(self.dbs, item[0], box=item[1]),
             lambda _item, result, error: GLib.idle_add(self._on_suggestions, result, error),
+        )
+
+        # Alcance de la curva con la pierna (cinemática inversa, ~1 s): en un hilo, solo el último.
+        self.reach_ok = True
+        self.reach_runner = LatestJobRunner(
+            lambda item: reach_report(*item),
+            lambda _item, result, error: GLib.idle_add(self._on_reach, result, error),
         )
 
         self.fit_button = Gtk.Button(label="Ajustar mecanismo")
@@ -598,12 +607,14 @@ class MainWindow(Gtk.ApplicationWindow):
         self.attach_ref, self.marker_ref, self._suggest_i = LEG_ATTACH, LEG_MARKER, 0
         if index in (1, 2):
             self._rebuild_leg_families()
-            self.editor.points = default_points(8, 0.55, 0.25, (0.9, -2.4))
+            cx, cy, ea, eb = LEG_DEFAULT_ELLIPSE
+            self.editor.points = default_points(8, ea, eb, (cx, cy))
             vp.fit_bounds(-1.5, -3.2, 2.5, 0.6, self.canvas.get_width(), self.canvas.get_height())
             self.status.set_text(
                 "Pierna de prueba: arrastrá la curva que debe dibujar la punta del pie "
                 "(punto rojo); el naranja es donde se une el mecanismo. Podés cambiarlos con "
-                "«Actuación» y «Marcador». Presioná «Ajustar»."
+                "«Actuación» y «Marcador». El pie solo llega a una franja diagonal: te aviso si "
+                "la curva se sale. Presioná «Ajustar»."
                 + (" Después, un slider de desfase por pierna." if index == 2 else "")
             )
         else:
@@ -617,6 +628,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._update_pick_controls(busy=False)
         self._refresh_properties()
         self.canvas.queue_draw()
+        self._check_reach()
 
     def _on_spline_changed(self) -> None:
         if self.leg_families:
@@ -657,6 +669,29 @@ class MainWindow(Gtk.ApplicationWindow):
             return
         self.history.commit(self._snapshot(), key)
         self._update_history_buttons()
+        self._check_reach()
+
+    def _check_reach(self) -> None:
+        """Pide en segundo plano cuánto de la curva objetivo alcanza el marcador de la pierna."""
+        if not self.leg_families or self._restoring:
+            return
+        curve = resample_closed(self.editor.curve(per_segment=24), 32)
+        self.reach_runner.submit((self.leg_families[0].character, self.marker_ref, curve))
+
+    def _on_reach(self, report: ReachReport | None, error: BaseException | None) -> bool:
+        if error is not None or report is None or not self.leg_families or self.runner.busy:
+            return False
+        if not report.ok:
+            self.status.set_text(
+                f"Atención: {report.n_outside} de {report.n_points} puntos de la curva quedan "
+                f"fuera del alcance de la pierna (al peor le faltan {report.worst:.2f}). El "
+                "ajuste no podrá recorrerlos: acercá la curva a la franja diagonal que alcanza "
+                "el pie."
+            )
+        elif not self.reach_ok:
+            self.status.set_text("La curva está al alcance de la pierna. Presioná «Ajustar».")
+        self.reach_ok = report.ok
+        return False
 
     def _update_history_buttons(self) -> None:
         self.undo_button.set_sensitive(self.history.can_undo)
@@ -702,6 +737,7 @@ class MainWindow(Gtk.ApplicationWindow):
             self._restoring = False
         self._refresh_properties()
         self.canvas.queue_draw()
+        self._check_reach()
 
     def _restore_fit(self, state: ProjectState, zoom: bool) -> None:
         """Vuelve a armar el mecanismo guardado desde sus parámetros."""

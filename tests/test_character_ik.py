@@ -26,7 +26,7 @@ def ellipse(cx: float, cy: float, a: float, b: float, n: int = 60) -> np.ndarray
 
 
 REACHABLE = ellipse(1.0, -2.0, 0.35, 0.15)  # el pie la recorre (ver test_kinematics)
-UNREACHABLE = ellipse(0.9, -2.4, 0.55, 0.25)  # la elipse por defecto de la escena
+UNREACHABLE = ellipse(0.9, -2.4, 0.55, 0.25)  # la elipse por defecto anterior de la escena
 
 
 def _family() -> CharacterFamily:

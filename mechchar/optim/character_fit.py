@@ -19,7 +19,13 @@ import numpy as np
 
 from mechchar.core.assembly import world_point
 from mechchar.core.character import Character, PointRef, RiggedMechanism, combine
-from mechchar.core.kinematics import POSE_TOL, point_curve, solve_pose, track_marker
+from mechchar.core.kinematics import (
+    POSE_TOL,
+    REACH_TOL_REL,
+    point_curve,
+    solve_pose,
+    track_marker,
+)
 from mechchar.optim.curves import bbox_diag, chamfer_rms
 from mechchar.optim.fitcore import (
     Built,
@@ -30,7 +36,6 @@ from mechchar.optim.fitcore import (
     trace_curve_generic,
 )
 
-REACH_TOL = 1e-3  # fracción del tamaño de la curva que se tolera sin sumar el método anterior
 HINT_RADIUS = 0.05  # distancia máxima para reusar la última pose como arranque
 
 
@@ -212,7 +217,7 @@ class CharacterFamily:
         assert self._bank is not None
         attach_curve = self._bank[0]
         pool = self._pool(y, attach_curve, size, n, n_candidates, n_pool, rng, place=False)
-        if self.reach_error > REACH_TOL * size or not pool:
+        if self.reach_error > REACH_TOL_REL * size or not pool:
             shift = np.asarray(self.attach.point) - np.asarray(self.marker.point)
             pool += self._pool(y, y + shift, size, n, n_candidates, n_pool, rng, place=True)
         pool.sort(key=lambda cand: cand.rel_error)

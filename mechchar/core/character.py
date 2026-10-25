@@ -307,6 +307,13 @@ def prefix_pose(
     return {prefix + name: xya for name, xya in pose.items()}
 
 
+# Elipse inicial de la escena de la pierna (centro x, y; semiejes a, b): una que el pie sí recorre.
+# El pie solo cubre una franja diagonal, y la anterior (0,9; −2,4; 0,55; 0,25) tenía el 44 % de
+# sus puntos fuera. Elegida entre varias por el error del ajuste: pegarse al borde del alcance
+# empeora los candidatos (0,40 × 0,17 centrada en (1,05; −2,05) ajustaba a 3,8 %, esta a 0,4 %).
+LEG_DEFAULT_ELLIPSE = (1.0, -2.05, 0.35, 0.15)
+
+
 # Puntos de la pierna de prueba: dónde se une el mecanismo y qué punto debe seguir la curva.
 LEG_ATTACH = PointRef("shank", (0.45, -1.8))  # medio de la pantorrilla
 LEG_MARKER = PointRef("foot", (0.9, -2.5))  # punta del pie
