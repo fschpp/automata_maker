@@ -122,9 +122,16 @@ def trace_curve_generic(
 
 
 def curve_and_jacobian_generic(
-    build_fn: Callable[[np.ndarray], Built | None], p: np.ndarray, n: int
+    build_fn: Callable[[np.ndarray], Built | None],
+    p: np.ndarray,
+    n: int,
+    perturbed_build_fn: Callable[[np.ndarray], Built | None] | None = None,
 ) -> tuple[np.ndarray, np.ndarray] | None:
-    """Curva x(p) (n, 2) y su Jacobiano dx/dp (n, 2, P), por función implícita."""
+    """Curva x(p) (n, 2) y su Jacobiano dx/dp (n, 2, P), por función implícita.
+
+    Los armados con un parámetro perturbado solo aportan su residuo (no se simulan), así que
+    pueden venir de ``perturbed_build_fn``, una versión más barata si la familia la tiene."""
+    pert_build = perturbed_build_fn or build_fn
     base = build_fn(p)
     if base is None:
         return None
@@ -140,7 +147,7 @@ def curve_and_jacobian_generic(
         pp, pm = p.copy(), p.copy()
         pp[j] += steps[j]
         pm[j] -= steps[j]
-        bp, bm = build_fn(pp), build_fn(pm)
+        bp, bm = pert_build(pp), pert_build(pm)
         if bp is None or bm is None:
             return None
         plus.append(bp)
@@ -323,11 +330,16 @@ def refine(
     def build_fn(q: np.ndarray) -> Built | None:
         return family.build(q, variant)
 
+    unposed = getattr(family, "build_unposed", None)
+
+    def pert_fn(q: np.ndarray) -> Built | None:
+        return unposed(q, variant) if unposed is not None else family.build(q, variant)
+
     def evaluate(p: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         key = p.tobytes()
         if key not in cache:
             cache.clear()
-            out = curve_and_jacobian_generic(build_fn, p, n)
+            out = curve_and_jacobian_generic(build_fn, p, n, pert_fn)
             if out is None:  # mecanismo no ensamblable: penalización para rechazar el paso
                 cache[key] = (np.full(n_res, size), np.zeros((n_res, family.n_params)))
             else:

@@ -186,13 +186,21 @@ class RiggedMechanism:
         return np.vstack(pts)
 
 
-def combine(character: Character, built: Any, attach: PointRef, marker: PointRef) -> Any:
+def combine(
+    character: Character,
+    built: Any,
+    attach: PointRef,
+    marker: PointRef,
+    s_char: np.ndarray | None = None,
+) -> Any:
     """Une un mecanismo armado (``Built``) al personaje con un pasador entre su marcador y el
     punto de actuación ``attach``. Devuelve un ``Built`` cuyo marcador es el de ``marker`` (el
-    punto del personaje cuya curva se quiere controlar)."""
+    punto del personaje cuya curva se quiere controlar). ``s_char`` es la pose inicial del
+    personaje (por defecto el reposo)."""
     from mechchar.optim.fitcore import Built  # import tardío: ``optim`` depende de ``core``
 
-    asm, s_char = character.build()
+    asm, s_rest = character.build()
+    s_char = s_rest if s_char is None else np.asarray(s_char, dtype=float)
     offset = asm.append(built.asm)
     asm.add(
         Pin(

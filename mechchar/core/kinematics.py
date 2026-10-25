@@ -5,9 +5,11 @@ está su punto de actuación. Para saber en qué pose empieza el conjunto (y qu�
 realidad el punto de actuación cuando el marcador sigue una curva) hay que resolver la pose del
 personaje dado un punto: ``solve_pose``. ``track_marker`` lo hace a lo largo de una curva, por
 continuación desde la pose de reposo (así queda en la misma rama de ensamblado que el reposo).
-Resolver desde el reposo alcanzó los 210 puntos de actuación alcanzables que se probaron en la
-pierna de prueba, así que no hay homotopía: si en otro personaje un punto lejano no converge, el
-error devuelto lo dice.
+Resolver desde el reposo alcanzó (error ~0) los 210 puntos de actuación alcanzables que se
+probaron en la pierna de prueba, así que no hace falta homotopía para llegar. Ojo: llegar no
+fija la pose. Un punto con 2 grados de libertad tiene varias ramas y ``solve_pose`` directo puede
+devolver otra que la que sigue el marcador; para esa rama hay que partir de una pose cercana
+(``track_marker`` la deja por continuación). Si un punto lejano no converge, el error lo dice.
 
 Las restricciones del personaje se imponen con un peso alto frente a los puntos objetivo, de modo
 que si un punto no es alcanzable la pose sigue siendo válida y el error queda en el punto.
