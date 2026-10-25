@@ -279,11 +279,16 @@ def biped_character() -> Character:
     return Character("bipedo", [_pelvis(), *left, *right], [*left_pivots, *right_pivots])
 
 
-def leg_refs(prefix: str = "") -> tuple[PointRef, PointRef]:
-    """Punto de actuación y marcador de una pierna del personaje con ese prefijo."""
+def leg_refs(
+    prefix: str = "", attach: PointRef | None = None, marker: PointRef | None = None
+) -> tuple[PointRef, PointRef]:
+    """Punto de actuación y marcador de una pierna del personaje con ese prefijo. Sin ``attach``
+    ni ``marker`` son los de la pierna de prueba; si no, los elegidos sobre una pierna sola (sin
+    prefijo), que se trasladan a la pierna con ese prefijo."""
+    attach, marker = attach or LEG_ATTACH, marker or LEG_MARKER
     return (
-        PointRef(prefix + LEG_ATTACH.part, LEG_ATTACH.point),
-        PointRef(prefix + LEG_MARKER.part, LEG_MARKER.point),
+        PointRef(prefix + attach.part, attach.point),
+        PointRef(prefix + marker.part, marker.point),
     )
 
 

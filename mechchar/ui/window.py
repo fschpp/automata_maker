@@ -11,9 +11,16 @@ import numpy as np
 gi.require_version("Gtk", "4.0")
 from gi.repository import GLib, Gtk  # noqa: E402
 
+from mechchar.core.actuation import (  # noqa: E402
+    ActuationAdvice,
+    advise,
+    point_mobility,
+    suggest_attach_points,
+)
 from mechchar.core.character import (  # noqa: E402
     LEG_ATTACH,
     LEG_MARKER,
+    PointRef,
     biped_character,
     leg_character,
     leg_refs,
@@ -22,6 +29,7 @@ from mechchar.core.playback import Playback  # noqa: E402
 from mechchar.core.project import (  # noqa: E402
     FitRecord,
     History,
+    PointPick,
     ProjectState,
     load_project,
     save_project,
@@ -48,6 +56,7 @@ from mechchar.optim.gearbox import GearBox, box_families, mechanism_bounds  # no
 from mechchar.optim.job import LatestJobRunner  # noqa: E402
 from mechchar.ui.box_editor import BoxEditor, draw_bounds  # noqa: E402
 from mechchar.ui.canvas import Canvas  # noqa: E402
+from mechchar.ui.point_picker import PointPicker  # noqa: E402
 from mechchar.ui.scene import (  # noqa: E402
     CANDIDATE_COLORS,
     draw_candidates,
@@ -118,6 +127,12 @@ class MainWindow(Gtk.ApplicationWindow):
         self._restoring = False  # mientras se restaura una foto no se registran cambios
         self.current_file: str | None = None
         self.mech_bounds: tuple[float, float, float, float] | None = None
+        # Puntos elegidos sobre el personaje (escenas con pierna) y su diagnóstico.
+        self.attach_ref: PointRef = LEG_ATTACH
+        self.marker_ref: PointRef = LEG_MARKER
+        self.advice: ActuationAdvice | None = None
+        self._suggest_i = 0
+        self._updating_mode = False
 
         self.canvas = Canvas()
         self.canvas.overlay = self._draw_scene
@@ -128,6 +143,9 @@ class MainWindow(Gtk.ApplicationWindow):
         self.box_editor = BoxEditor(self.canvas.viewport)
         self.box_editor.on_preview = lambda: self.canvas.queue_draw()
         self.box_editor.on_change = self._on_box_changed
+        self.picker = PointPicker(self.canvas.viewport)
+        self.picker.on_pick = self._on_point_picked
+        self.picker.on_miss = self._on_pick_miss
 
         self.runner = LatestJobRunner(
             self._fit_work,
@@ -157,7 +175,27 @@ class MainWindow(Gtk.ApplicationWindow):
             "Caja de engranajes: activala y arrastrá en el lienzo para dibujar el rectángulo "
             "donde tiene que caber el mecanismo."
         )
-        self.box_toggle.connect("toggled", self._on_box_toggled)
+        self.box_toggle.connect("toggled", self._on_mode_toggled, "box")
+        self.attach_toggle = Gtk.ToggleButton(label="Actuación")
+        self.attach_toggle.set_tooltip_text(
+            "Elegir el punto de actuación: activalo y hacé clic sobre una pieza del personaje "
+            "(ahí se une el mecanismo)."
+        )
+        self.marker_toggle = Gtk.ToggleButton(label="Marcador")
+        self.marker_toggle.set_tooltip_text(
+            "Elegir el marcador: activalo y hacé clic sobre el punto del personaje cuya curva "
+            "querés controlar."
+        )
+        self.suggest_button = Gtk.Button(label="Sugerir")
+        self.suggest_button.set_tooltip_text(
+            "Sugerir un punto de actuación para el marcador actual (repetí para ver el siguiente)"
+        )
+        self.attach_toggle.connect("toggled", self._on_mode_toggled, "attach")
+        self.marker_toggle.connect("toggled", self._on_mode_toggled, "marker")
+        self.suggest_button.connect("clicked", self._on_suggest_clicked)
+        self.pick_controls = (self.attach_toggle, self.marker_toggle, self.suggest_button)
+        for widget in self.pick_controls:
+            widget.set_sensitive(False)
         self.box_clear = Gtk.Button(label="✕")
         self.box_clear.set_tooltip_text("Quitar la caja de engranajes")
         self.box_clear.set_sensitive(False)
@@ -178,7 +216,7 @@ class MainWindow(Gtk.ApplicationWindow):
         controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         row = (
             self.scene_dropdown, self.fit_button, self.box_toggle, self.box_clear,
-            *self.candidate_buttons, self.play_button,
+            *self.pick_controls, *self.candidate_buttons, self.play_button,
         )
         for widget in row:
             controls.append(widget)
@@ -207,8 +245,30 @@ class MainWindow(Gtk.ApplicationWindow):
         self.phase_row.set_margin_end(6)
         self.phase_row.set_visible(False)
 
+        # Panel de propiedades (solo en las escenas con personaje).
+        self.props = Gtk.Label()
+        self.props.set_xalign(0.0)
+        self.props.set_yalign(0.0)
+        self.props.set_wrap(True)
+        self.props.set_selectable(True)
+        self.props.set_width_chars(30)
+        self.props.set_max_width_chars(34)
+        for margin in ("start", "end", "top", "bottom"):
+            getattr(self.props, f"set_margin_{margin}")(8)
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroller.set_min_content_width(280)
+        scroller.set_child(self.props)
+        self.props_frame = Gtk.Frame(label="Propiedades")
+        self.props_frame.set_child(scroller)
+        self.props_frame.set_visible(False)
+        middle = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        middle.append(self.canvas)
+        middle.append(self.props_frame)
+        middle.set_vexpand(True)
+
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        root.append(self.canvas)
+        root.append(middle)
         root.append(controls)
         root.append(self.phase_row)
         root.append(self.status)
@@ -313,7 +373,7 @@ class MainWindow(Gtk.ApplicationWindow):
         if self.leg_families and self.mech is None:
             character = self.leg_families[0].character
             rest = character.build()[1]
-            draw_character(cr, vp, character, rest, [LEG_ATTACH, LEG_MARKER])
+            draw_character(cr, vp, character, rest, [self.attach_ref, self.marker_ref])
             if self.biped:  # el ajuste se hace sobre una pierna; el bípedo se arma al terminar
                 draw_character(cr, vp, biped_character(), biped_character().build()[1])
         self.editor.draw(cr, vp)
@@ -354,7 +414,11 @@ class MainWindow(Gtk.ApplicationWindow):
             self._start_fit(None)
 
     def _start_fit(self, chosen: Suggestion | None) -> None:
+        if self.leg_families and self.advice is not None and not self.advice.ok:
+            self.status.set_text("No se puede ajustar: " + self.advice.text)
+            return
         self.fit_button.set_sensitive(False)
+        self._update_pick_controls(busy=True)
         for button in self.candidate_buttons:
             button.set_sensitive(False)
         what = "candidato elegido" if chosen is not None else "mecanismo"
@@ -378,6 +442,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _on_fit_done(self, result: FitResult | None, error: BaseException | None) -> bool:
         self.fit_button.set_sensitive(True)
+        self._update_pick_controls(busy=False)
         self.progress = None
         for i, button in enumerate(self.candidate_buttons):
             button.set_sensitive(i < len(self.suggestions))
@@ -414,6 +479,7 @@ class MainWindow(Gtk.ApplicationWindow):
             f"Ajuste listo: {describe(result)}, error {pct:.1f} % del tamaño de la curva.{note}"
         )
         self._zoom_to_fit(fb)
+        self._refresh_properties()
         self._commit()
         self.canvas.queue_draw()
         return False  # GLib.SOURCE_REMOVE
@@ -446,7 +512,7 @@ class MainWindow(Gtk.ApplicationWindow):
             mech = base.to_mechanism(result.params, result.variant)
             if built is None or mech is None:
                 return None
-            attach, marker = leg_refs(prefix)
+            attach, marker = leg_refs(prefix, self.attach_ref, self.marker_ref)
             specs.append(SubSpec(prefix + "leg", built, mech, attach, marker))
         try:
             return MultiRig(biped_character(), specs)
@@ -479,6 +545,7 @@ class MainWindow(Gtk.ApplicationWindow):
             self._updating_phase = True
             scale.set_value(rig.phases[k])
             self._updating_phase = False
+        self._refresh_properties()
         self._commit(key=f"fase{k}")
         self.canvas.queue_draw()
 
@@ -518,26 +585,27 @@ class MainWindow(Gtk.ApplicationWindow):
         self.biped = index == 2
         self.phase_row.set_visible(self.biped)
         vp = self.canvas.viewport
+        self.attach_ref, self.marker_ref, self._suggest_i = LEG_ATTACH, LEG_MARKER, 0
         if index in (1, 2):
-            leg = leg_character()
-            self.leg_families = tuple(
-                CharacterFamily(base, leg, LEG_ATTACH, LEG_MARKER)
-                for base in ALL_FAMILIES
-            )
+            self._rebuild_leg_families()
             self.editor.points = default_points(8, 0.55, 0.25, (0.9, -2.4))
             vp.fit_bounds(-1.5, -3.2, 2.5, 0.6, self.canvas.get_width(), self.canvas.get_height())
             self.status.set_text(
                 "Pierna de prueba: arrastrá la curva que debe dibujar la punta del pie "
-                "(punto rojo); el naranja es donde se une el mecanismo. Presioná «Ajustar»."
+                "(punto rojo); el naranja es donde se une el mecanismo. Podés cambiarlos con "
+                "«Actuación» y «Marcador». Presioná «Ajustar»."
                 + (" Después, un slider de desfase por pierna." if index == 2 else "")
             )
         else:
             self.leg_families = ()
+            self.picker.character, self.advice = None, None
             self.editor.points = default_points()
             w, h = self.canvas.get_width(), self.canvas.get_height()
             vp.scale, vp.ox, vp.oy = 50.0, w * 0.3, h / 2
             self.status.set_text("Arrastrá los puntos azules y presioná «Ajustar».")
             self._request_suggestions()
+        self._update_pick_controls(busy=False)
+        self._refresh_properties()
         self.canvas.queue_draw()
 
     def _on_spline_changed(self) -> None:
@@ -560,12 +628,18 @@ class MainWindow(Gtk.ApplicationWindow):
             )
         phases = tuple(self.mech.phases) if isinstance(self.mech, MultiRig) else ()
         b = self.box
+        attach = marker = None
+        if self.leg_families:
+            attach = PointPick(self.attach_ref.part, *self.attach_ref.point)
+            marker = PointPick(self.marker_ref.part, *self.marker_ref.point)
         return ProjectState(
             int(self.scene_dropdown.get_selected()),
             tuple((float(x), float(y)) for x, y in self.editor.points),
             None if b is None else (b.x0, b.y0, b.x1, b.y1),
             fit,
             phases,
+            attach,
+            marker,
         )
 
     def _commit(self, key: str | None = None) -> None:
@@ -602,6 +676,8 @@ class MainWindow(Gtk.ApplicationWindow):
                 self.set_scene(state.scene)
             else:
                 self._clear_result()
+            if self.leg_families:
+                self._apply_picks(state.attach, state.marker)
             self.editor.points = list(state.spline)
             b = state.box
             self.box_editor.box = None if b is None else GearBox(*b)
@@ -614,6 +690,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 self._restore_fit(state, zoom)
         finally:
             self._restoring = False
+        self._refresh_properties()
         self.canvas.queue_draw()
 
     def _restore_fit(self, state: ProjectState, zoom: bool) -> None:
@@ -702,9 +779,153 @@ class MainWindow(Gtk.ApplicationWindow):
         self.set_title(f"Mechanical Characters Designer — {os.path.basename(path)}")
         return True
 
-    def _on_box_toggled(self, button: Gtk.ToggleButton) -> None:
-        """Con «Caja» activo, arrastrar en el lienzo dibuja la caja; si no, edita la curva."""
-        self.canvas.drag_target = self.box_editor if button.get_active() else self.editor
+    def _on_mode_toggled(self, button: Gtk.ToggleButton, mode: str) -> None:
+        """Modo del lienzo: con «Caja» arrastrar dibuja la caja; con «Actuación» o «Marcador» un
+        clic elige un punto del personaje; sin ninguno, arrastrar edita la curva (excluyentes)."""
+        if self._updating_mode:
+            return
+        toggles = {
+            "box": self.box_toggle, "attach": self.attach_toggle, "marker": self.marker_toggle
+        }
+        if button.get_active():
+            self._updating_mode = True
+            for other, toggle in toggles.items():
+                if other != mode:
+                    toggle.set_active(False)
+            self._updating_mode = False
+            if mode == "box":
+                self.canvas.drag_target = self.box_editor
+            else:
+                self.picker.mode = mode
+                self.canvas.drag_target = self.picker
+        elif not any(t.get_active() for t in toggles.values()):
+            self.canvas.drag_target = self.editor
+
+    # --- puntos de actuación y marcador --------------------------------------
+    def _update_pick_controls(self, busy: bool) -> None:
+        enabled = bool(self.leg_families) and not busy
+        for widget in self.pick_controls:
+            widget.set_sensitive(enabled)
+        if not self.leg_families:  # sin personaje no hay nada que elegir
+            for toggle in (self.attach_toggle, self.marker_toggle):
+                toggle.set_active(False)
+
+    def _rebuild_leg_families(self) -> None:
+        """Arma las familias con personaje para los puntos elegidos y rehace el diagnóstico."""
+        leg = leg_character()
+        self.leg_families = tuple(
+            CharacterFamily(base, leg, self.attach_ref, self.marker_ref) for base in ALL_FAMILIES
+        )
+        self.picker.character = leg
+        self.advice = advise(leg, self.attach_ref, self.marker_ref)
+        self._refresh_properties()
+
+    def set_points(self, attach: PointRef | None = None, marker: PointRef | None = None) -> None:
+        """Cambia el punto de actuación y/o el marcador. El mecanismo ajustado deja de valer y se
+        quita; si se mueve el marcador, la curva objetivo lo acompaña (se traslada igual)."""
+        if not self.leg_families:
+            return
+        new_attach, new_marker = attach or self.attach_ref, marker or self.marker_ref
+        if new_attach == self.attach_ref and new_marker == self.marker_ref:
+            return
+        if new_marker != self.marker_ref:
+            dx = new_marker.point[0] - self.marker_ref.point[0]
+            dy = new_marker.point[1] - self.marker_ref.point[1]
+            self.editor.points = [(x + dx, y + dy) for x, y in self.editor.points]
+            self._suggest_i = 0
+        self.attach_ref, self.marker_ref = new_attach, new_marker
+        self._clear_result()
+        self._rebuild_leg_families()
+        assert self.advice is not None
+        self.status.set_text(
+            f"Actuación en «{new_attach.part}», marcador en «{new_marker.part}». "
+            + self.advice.text
+        )
+        self._commit()
+        self.canvas.queue_draw()
+
+    def _on_pick_miss(self) -> None:
+        self.status.set_text("Hacé clic sobre una pieza del personaje (o cerca de ella).")
+
+    def _on_point_picked(self, ref: PointRef, mode: str) -> None:
+        if self.runner.busy:
+            self.status.set_text("Esperá a que termine el ajuste para cambiar los puntos.")
+            return
+        if mode == "attach":
+            self.set_points(attach=ref)
+        else:
+            self.set_points(marker=ref)
+
+    def _on_suggest_clicked(self, _button: Gtk.Button) -> None:
+        if self.runner.busy or self.picker.character is None:
+            return
+        found = suggest_attach_points(self.picker.character, self.marker_ref, limit=3)
+        if not found:
+            self.status.set_text("No encontré un punto de actuación que se mueva en el plano.")
+            return
+        ref, score = found[self._suggest_i % len(found)]
+        self._suggest_i += 1
+        self.set_points(attach=ref)
+        self.status.set_text(
+            f"Sugerido {self._suggest_i}: actuación en «{ref.part}» (alcance {score:.2f}; es una "
+            "pista de primer orden, no un pronóstico del error). «Sugerir» de nuevo muestra otro."
+        )
+
+    def _apply_picks(self, attach: PointPick | None, marker: PointPick | None) -> None:
+        """Pone los puntos de una foto (``None`` = los de la escena); si una pieza ya no existe,
+        usa el punto por defecto y lo avisa."""
+        leg = leg_character()
+        refs: list[PointRef] = []
+        for pick, default in ((attach, LEG_ATTACH), (marker, LEG_MARKER)):
+            if pick is None:
+                refs.append(default)
+                continue
+            try:
+                leg.index(pick.part)
+            except KeyError:
+                self.status.set_text(f"El proyecto usa una pieza desconocida: {pick.part}.")
+                refs.append(default)
+                continue
+            refs.append(PointRef(pick.part, (pick.x, pick.y)))
+        self.attach_ref, self.marker_ref = refs
+        self._rebuild_leg_families()
+
+    def _refresh_properties(self) -> None:
+        """Panel de propiedades: personaje, puntos elegidos, diagnóstico y estado del ajuste."""
+        self.props_frame.set_visible(bool(self.leg_families))
+        leg = self.picker.character
+        if not self.leg_families or leg is None or self.advice is None:
+            self.props.set_text("")
+            return
+        esc = GLib.markup_escape_text
+        n_fixed = sum(1 for part in leg.parts if part.fixed)
+        lines = [
+            f"<b>{esc(leg.name.capitalize())}</b>",
+            f"{len(leg.parts)} piezas ({n_fixed} fija)" if n_fixed == 1
+            else f"{len(leg.parts)} piezas ({n_fixed} fijas)",
+            f"Grados de libertad solo: {self.advice.dof}",
+            "",
+        ]
+        for title, ref in (("Punto de actuación", self.attach_ref), ("Marcador", self.marker_ref)):
+            part = leg.parts[leg.index(ref.part)]
+            mob = point_mobility(leg, ref)
+            lines.append(f"<b>{title}</b>")
+            lines.append(
+                f"«{esc(ref.part)}» en ({ref.point[0]:.2f}, {ref.point[1]:.2f})"
+                f" · plano z = {part.z:g}" + (" · fija" if part.fixed else "")
+            )
+            lines.append(f"Se mueve en {mob} dirección(es) independiente(s)")
+            lines.append("")
+        color = "#1a7f37" if self.advice.ok else "#b3261e"
+        lines.append(f'<span foreground="{color}">{esc(self.advice.text)}</span>')
+        if self.fit_result is not None:
+            lines += ["", "<b>Ajuste</b>", esc(describe(self.fit_result)),
+                      f"Error {self.fit_result.rms_rel * 100:.1f} % del tamaño de la curva"]
+        if isinstance(self.mech, MultiRig):
+            lines += ["", "<b>Desfases</b>"]
+            for sub, phase in zip(self.mech.subs, self.mech.phases, strict=True):
+                lines.append(f"{esc(sub.name)}: {phase:.2f} ciclo")
+        self.props.set_markup("\n".join(lines))
 
     def _on_box_changed(self) -> None:
         self.box = self.box_editor.box

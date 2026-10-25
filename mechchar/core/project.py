@@ -58,12 +58,39 @@ class FitRecord:
 
 
 @dataclass(frozen=True)
+class PointPick:
+    """Un punto elegido sobre una pieza del personaje (actuación o marcador), en el mundo en
+    reposo. Es la versión guardable de ``character.PointRef``."""
+
+    part: str
+    x: float
+    y: float
+
+    def __post_init__(self) -> None:
+        if not self.part:
+            raise ValueError("el punto elegido no tiene pieza")
+        _finite((self.x, self.y), "punto elegido")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"part": self.part, "point": [self.x, self.y]}
+
+    @classmethod
+    def from_dict(cls, raw: Any) -> PointPick:
+        x, y = _point(raw["point"])
+        return cls(str(raw["part"]), x, y)
+
+
+@dataclass(frozen=True)
 class ProjectState:
     scene: int = 0
     spline: tuple[tuple[float, float], ...] = ()
     box: tuple[float, float, float, float] | None = None  # x0, y0, x1, y1
     fit: FitRecord | None = None
     phases: tuple[float, ...] = field(default_factory=tuple)
+    # Puntos elegidos en las escenas con personaje; ``None`` = los de la escena por defecto.
+    # Opcionales: los proyectos anteriores no los traen y se abren igual.
+    attach: PointPick | None = None
+    marker: PointPick | None = None
 
     def __post_init__(self) -> None:
         if self.scene < 0:
@@ -99,6 +126,8 @@ class ProjectState:
                 "rms_rel": self.fit.rms_rel,
             },
             "phases": list(self.phases),
+            "attach": None if self.attach is None else self.attach.to_dict(),
+            "marker": None if self.marker is None else self.marker.to_dict(),
         }
 
     @classmethod
@@ -127,6 +156,8 @@ class ProjectState:
                 None if raw_box is None else _box_tuple(raw_box),
                 fit,
                 _finite(d.get("phases", ()), "desfases"),
+                None if d.get("attach") is None else PointPick.from_dict(d["attach"]),
+                None if d.get("marker") is None else PointPick.from_dict(d["marker"]),
             )
         except (KeyError, TypeError) as exc:
             raise ValueError(f"proyecto incompleto o mal formado ({exc!r})") from exc
