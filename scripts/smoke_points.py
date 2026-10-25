@@ -146,6 +146,9 @@ def script(win, tmp: Path):
     check(win.mech.analyze().dof == 0 and win.mech.analyze().redundant == 0,
           "el conjunto queda con 0 grados de libertad y sin redundancia")
     check("Desfases" in win.props.get_label(), "el panel muestra los desfases")
+    check(win.active_leg is None, "sin tocar sliders no hay pierna resaltada")
+    win.phase_scales[0].set_value(0.1)
+    check(win.active_leg == 0, "mover un slider resalta su pierna (la otra se atenúa)")
     render(win, "/tmp/shot_points_2_bipedo.png")
 
 

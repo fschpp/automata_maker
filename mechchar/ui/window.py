@@ -133,6 +133,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.advice: ActuationAdvice | None = None
         self._suggest_i = 0
         self._updating_mode = False
+        self.active_leg: int | None = None  # mecanismo cuyo slider de desfase se movió último
 
         self.canvas = Canvas()
         self.canvas.overlay = self._draw_scene
@@ -385,7 +386,7 @@ class MainWindow(Gtk.ApplicationWindow):
                     draw_bounds(cr, vp, s.bounds, CANDIDATE_COLORS[i])
         if self.mech is not None and self.playback is not None:
             draw_path(cr, vp, self.path)
-            draw_mechanism(cr, vp, self.mech, self.playback.state)
+            draw_mechanism(cr, vp, self.mech, self.playback.state, self.active_leg)
             if self.mech_bounds is not None:
                 inside = self.box is None or self.box.contains(self.mech_bounds, self.box.slack)
                 draw_bounds(cr, vp, self.mech_bounds, (0.1, 0.55, 0.2), inside)
@@ -545,6 +546,7 @@ class MainWindow(Gtk.ApplicationWindow):
             self._updating_phase = True
             scale.set_value(rig.phases[k])
             self._updating_phase = False
+        self.active_leg = k  # el resto se atenúa para ver qué pierna controla el slider
         self._refresh_properties()
         self._commit(key=f"fase{k}")
         self.canvas.queue_draw()
@@ -569,6 +571,7 @@ class MainWindow(Gtk.ApplicationWindow):
     def _clear_result(self) -> None:
         """Quita el mecanismo mostrado (y su reproducción) sin tocar la curva ni la caja."""
         self.mech, self.playback, self.progress, self.fit_result = None, None, None, None
+        self.active_leg = None
         self.path, self.suggestions = [], []
         self.mech_bounds = None
         for scale in self.phase_scales:

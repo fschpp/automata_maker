@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
 
 from mechchar.core.assembly import world_point
-from mechchar.core.character import Character, PointRef, RiggedMechanism
+from mechchar.core.character import Character, Part, PointRef, RiggedMechanism
 from mechchar.core.mechanisms import FourBar, GearedFiveBar
 from mechchar.core.rig import MultiRig
 from mechchar.core.viewport import Viewport
@@ -138,10 +139,14 @@ def draw_character(
     character: Character,
     state: np.ndarray,
     marks: list[PointRef] | None = None,
+    select: Callable[[Part], bool] | None = None,
 ) -> None:
     """Piezas del personaje (las fijas, más oscuras) y, si se pide, sus puntos marcados:
-    naranja el punto de actuación (primero) y rojo el marcador de la curva (segundo)."""
+    naranja el punto de actuación (primero) y rojo el marcador de la curva (segundo).
+    ``select`` limita qué piezas se dibujan."""
     for i, part in enumerate(character.parts):
+        if select is not None and not select(part):
+            continue
         poly = character.part_polygon(state, i)
         _polygon(cr, vp, poly, FIXED_FILL if part.fixed else PART_FILL, PART_EDGE)
     for ref, color in zip(marks or [], (ATTACH_COLOR, TRACER_COLOR), strict=False):
@@ -167,11 +172,35 @@ def draw_rigged(cr: Any, vp: Viewport, rig: RiggedMechanism, state: np.ndarray) 
     cr.fill()
 
 
-def draw_multirig(cr: Any, vp: Viewport, rig: MultiRig, state: np.ndarray) -> None:
+def _in_plane(z: float) -> Callable[[Part], bool]:
+    return lambda part: not part.fixed and part.z == z
+
+
+Z_SHIFT_PX = 26.0  # desplazamiento en pantalla por plano de profundidad (solo al dibujar)
+INACTIVE_ALPHA = 0.4
+
+
+def draw_multirig(
+    cr: Any, vp: Viewport, rig: MultiRig, state: np.ndarray, active: int | None = None
+) -> None:
     """Personaje con todos sus mecanismos; el marcador de cada pierna en rojo y su punto de
-    actuación en naranja."""
-    draw_character(cr, vp, rig.character, state)
+    actuación en naranja.
+
+    Las piezas móviles de cada mecanismo se dibujan en el plano ``z`` de su pieza de actuación,
+    corridas ``Z_SHIFT_PX`` píxeles por plano para que dos piernas superpuestas en 2D se lean por
+    separado (la simulación no cambia). Si ``active`` es un índice de mecanismo, los demás se
+    atenúan: así se ve qué pierna controla el slider que se está moviendo."""
+    ch = rig.character
+    draw_character(cr, vp, ch, state, select=lambda part: part.fixed)
+    zs = sorted({ch.parts[ch.index(sub.attach.part)].z for sub in rig.subs})
     for k, sub in enumerate(rig.subs):
+        z = ch.parts[ch.index(sub.attach.part)].z
+        cr.save()
+        cr.translate(Z_SHIFT_PX * zs.index(z), 0.0)
+        dim = active is not None and active != k
+        if dim:
+            cr.push_group()
+        draw_character(cr, vp, ch, state, select=_in_plane(z))
         mech_state = rig.mech_state(state, k)
         draw_mechanism(cr, vp, sub.mechanism, mech_state)
         x, y = _screen(vp, sub.mechanism.tracer_world(mech_state))
@@ -182,11 +211,17 @@ def draw_multirig(cr: Any, vp: Viewport, rig: MultiRig, state: np.ndarray) -> No
         cr.arc(x, y, 6.0, 0, 6.283185307179586)
         cr.set_source_rgb(*TRACER_COLOR)
         cr.fill()
+        if dim:
+            cr.pop_group_to_source()
+            cr.paint_with_alpha(INACTIVE_ALPHA)
+        cr.restore()
 
 
-def draw_mechanism(cr: Any, vp: Viewport, mech: Any, state: np.ndarray) -> None:
+def draw_mechanism(
+    cr: Any, vp: Viewport, mech: Any, state: np.ndarray, active: int | None = None
+) -> None:
     if isinstance(mech, MultiRig):
-        draw_multirig(cr, vp, mech, state)
+        draw_multirig(cr, vp, mech, state, active)
     elif isinstance(mech, RiggedMechanism):
         draw_rigged(cr, vp, mech, state)
     elif isinstance(mech, GearedFiveBar):
