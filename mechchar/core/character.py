@@ -300,6 +300,13 @@ def leg_refs(
     )
 
 
+def prefix_pose(
+    pose: dict[str, tuple[float, float, float]], prefix: str
+) -> dict[str, tuple[float, float, float]]:
+    """Pose de las piezas de una pierna sola, con los nombres de la pierna con ese prefijo."""
+    return {prefix + name: xya for name, xya in pose.items()}
+
+
 # Puntos de la pierna de prueba: dónde se une el mecanismo y qué punto debe seguir la curva.
 LEG_ATTACH = PointRef("shank", (0.45, -1.8))  # medio de la pantorrilla
 LEG_MARKER = PointRef("foot", (0.9, -2.5))  # punta del pie

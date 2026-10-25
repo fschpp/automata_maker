@@ -35,6 +35,10 @@ class SubSpec:
     mechanism: Any  # FourBar | GearedFiveBar
     attach: PointRef
     marker: PointRef
+    # Pose inicial de las piezas del personaje que mueve este mecanismo: nombre de pieza en el
+    # personaje conjunto -> (x, y, ángulo). Fija la rama del personaje en t = 0 (ver
+    # ``CharacterFamily.pose_for``); sin ella queda el reposo y el solver elige la rama.
+    pose: dict[str, tuple[float, float, float]] | None = None
 
 
 @dataclass
@@ -68,6 +72,13 @@ class MultiRig:
         self.character = character
         self.n_char = len(character.parts)
         asm, s_char = character.build()
+        s_char = s_char.copy()
+        for sp in specs:
+            for part, xya in (sp.pose or {}).items():
+                if part not in {p.name for p in character.parts}:
+                    raise ValueError(f"{sp.name}: la pose nombra una pieza que no existe: {part}")
+                i = 3 * character.index(part)
+                s_char[i : i + 3] = xya
         states = [s_char]
         self.subs: list[SubAssembly] = []
         for sp in specs:

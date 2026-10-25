@@ -92,6 +92,25 @@ class CharacterFamily:
         self._hint = (states_rest[0], target)
         return states_rest[0]
 
+    def pose_for(
+        self, p: np.ndarray, variant: Variant
+    ) -> dict[str, tuple[float, float, float]] | None:
+        """Pose inicial (t = 0) de las piezas móviles del personaje con este mecanismo, por nombre.
+
+        Es la misma que usa ``build``; sirve para armar el personaje en otro conjunto (bípedo)
+        en la misma rama que se midió al ajustar. None si el mecanismo no alcanza su punto."""
+        built = self.base.build(p, variant)
+        if built is None:
+            return None
+        pose = self.initial_pose(world_point(built.state0, built.coupler, built.tracer))
+        if pose is None:
+            return None
+        return {
+            part.name: (float(pose[3 * i]), float(pose[3 * i + 1]), float(pose[3 * i + 2]))
+            for i, part in enumerate(self.character.parts)
+            if not part.fixed
+        }
+
     def build_unposed(self, p: np.ndarray, variant: Variant) -> Built | None:
         """Como ``build`` pero con el personaje en reposo, sin cinemática inversa: para armados
         de los que solo se usan las ecuaciones (el Jacobiano por perturbación)."""

@@ -24,6 +24,7 @@ from mechchar.core.character import (  # noqa: E402
     biped_character,
     leg_character,
     leg_refs,
+    prefix_pose,
 )
 from mechchar.core.playback import Playback  # noqa: E402
 from mechchar.core.project import (  # noqa: E402
@@ -44,6 +45,7 @@ from mechchar.db.motion_db import (  # noqa: E402
     suggest,
 )
 from mechchar.optim.character_fit import CharacterFamily  # noqa: E402
+from mechchar.optim.curves import resample_closed  # noqa: E402
 from mechchar.optim.families import ALL_FAMILIES, family_by_name, fit_best  # noqa: E402
 from mechchar.optim.fitcore import (  # noqa: E402
     FitResult,
@@ -506,7 +508,11 @@ class MainWindow(Gtk.ApplicationWindow):
     def _build_biped(self, result: FitResult) -> MultiRig | None:
         """Usa el mecanismo ajustado a una pierna en las dos del bípedo (cada una con su propio
         desfase). Los mecanismos son iguales, así que la unión es factible en reposo."""
-        base = self._family(result.family).base
+        fam = self._family(result.family)
+        base = fam.base
+        # la pose de cada pierna en t = 0 sale de la IK: sin ella el solver podría caer en otra
+        # rama del personaje sin avisar (las piernas trazarían otra curva que la ajustada)
+        pose = fam.pose_for(result.params, result.variant)
         specs = []
         for prefix in LEG_PREFIXES:
             built = base.build(result.params, result.variant)
@@ -514,7 +520,8 @@ class MainWindow(Gtk.ApplicationWindow):
             if built is None or mech is None:
                 return None
             attach, marker = leg_refs(prefix, self.attach_ref, self.marker_ref)
-            specs.append(SubSpec(prefix + "leg", built, mech, attach, marker))
+            leg_pose = prefix_pose(pose, prefix) if pose is not None else None
+            specs.append(SubSpec(prefix + "leg", built, mech, attach, marker, leg_pose))
         try:
             return MultiRig(biped_character(), specs)
         except ValueError as exc:
@@ -710,6 +717,8 @@ class MainWindow(Gtk.ApplicationWindow):
         if len(params) != fam.n_params:
             self.status.set_text("Los parámetros guardados no corresponden a esa familia.")
             return
+        if self.leg_families:  # el banco de poses de la IK sale de la curva objetivo guardada
+            fam.prepare(resample_closed(self.editor.curve(per_segment=24), 48))
         curve = trace_curve_generic(lambda p: fam.build(p, variant), params, 180)
         fb = fam.to_mechanism(params, variant)
         if curve is None or fb is None:
