@@ -248,4 +248,48 @@ def geared_five_bar(
     )
 
 
-Mechanism = FourBar | GearedFiveBar  # mecanismos que el ajuste sabe producir y la UI sabe dibujar
+@dataclass
+class SliderCrank:
+    """Manivela-corredera con marcador: manivela ``r`` en el pivote de la bancada, biela ``l``
+    cuyo extremo se guía sobre la recta y = ``h`` del marco de la bancada (``h`` ≠ 0 es una
+    corredera descentrada). El marcador va sobre la biela, en coordenadas locales de ``rod``."""
+
+    asm: Assembly
+    state0: np.ndarray
+    ground: int
+    crank: int
+    rod: int
+    tracer: Vec
+    r: float
+    l: float  # noqa: E741
+    h: float
+
+    def tracer_world(self, state: np.ndarray) -> np.ndarray:
+        return self.asm.world_point(state, self.rod, self.tracer)
+
+    def joints(self, state: np.ndarray) -> np.ndarray:
+        """Pivote de la manivela, su punta, el extremo de la biela (la corredera) y el marcador."""
+        w = self.asm.world_point
+        return np.array(
+            [
+                w(state, self.ground, (0.0, 0.0)),
+                w(state, self.crank, (self.r, 0.0)),
+                w(state, self.rod, (self.l, 0.0)),
+                self.tracer_world(state),
+            ]
+        )
+
+    def guide(self, state: np.ndarray) -> np.ndarray:
+        """Extremos de la guía de la corredera (solo para dibujar): recorre ± (r + l)."""
+        reach = self.r + self.l
+        w = self.asm.world_point
+        return np.array(
+            [w(state, self.ground, (-reach, self.h)), w(state, self.ground, (reach, self.h))]
+        )
+
+    def outline_points(self, state: np.ndarray) -> np.ndarray:
+        """Puntos que delimitan el dibujo del mecanismo (para encuadrar la vista)."""
+        return np.vstack([self.joints(state), self.guide(state)])
+
+
+Mechanism = FourBar | GearedFiveBar | SliderCrank  # los que el ajuste produce y la UI dibuja

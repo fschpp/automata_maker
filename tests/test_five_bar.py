@@ -148,7 +148,7 @@ def test_compactness_jacobian_matches_finite_differences(ratio):
 
 
 def test_registry():
-    assert [f.name for f in ALL_FAMILIES] == ["four_bar", "geared_five_bar"]
+    assert [f.name for f in ALL_FAMILIES] == ["four_bar", "geared_five_bar", "slider_crank"]
     assert family_by_name("geared_five_bar") is GEARED_FIVE_BAR
     with pytest.raises(KeyError):
         family_by_name("no existe")

@@ -9,7 +9,7 @@ import numpy as np
 
 from mechchar.core.assembly import world_point
 from mechchar.core.character import Character, Part, PointRef, RiggedMechanism
-from mechchar.core.mechanisms import FourBar, GearedFiveBar
+from mechchar.core.mechanisms import FourBar, GearedFiveBar, SliderCrank
 from mechchar.core.rig import MultiRig
 from mechchar.core.viewport import Viewport
 
@@ -108,6 +108,22 @@ def draw_five_bar(cr: Any, vp: Viewport, fb: GearedFiveBar, state: np.ndarray) -
     _line(cr, vp, b2, j, 5.0, LINK_COLOR)  # biela 2
     _line(cr, vp, j, tracer, 3.0, LINK_COLOR)  # prolongación de la biela 1 hasta el marcador
     for p in (a, d, b1, b2, j):
+        _joint(cr, vp, p)
+    x, y = _screen(vp, tracer)
+    cr.set_source_rgb(*TRACER_COLOR)
+    cr.arc(x, y, 5.0, 0, 6.283185307179586)
+    cr.fill()
+
+
+def draw_slider_crank(cr: Any, vp: Viewport, sc: SliderCrank, state: np.ndarray) -> None:
+    a, b, slider, tracer = sc.joints(state)
+    g0, g1 = sc.guide(state)
+    _line(cr, vp, g0, g1, 3.0, GROUND_COLOR)  # guía de la corredera
+    _line(cr, vp, a, b, 4.0, LINK_COLOR)  # manivela
+    _line(cr, vp, b, slider, 5.0, LINK_COLOR)  # biela
+    _line(cr, vp, b, tracer, 2.0, LINK_COLOR)
+    _line(cr, vp, slider, tracer, 2.0, LINK_COLOR)
+    for p in (a, b, slider):
         _joint(cr, vp, p)
     x, y = _screen(vp, tracer)
     cr.set_source_rgb(*TRACER_COLOR)
@@ -226,6 +242,8 @@ def draw_mechanism(
         draw_rigged(cr, vp, mech, state)
     elif isinstance(mech, GearedFiveBar):
         draw_five_bar(cr, vp, mech, state)
+    elif isinstance(mech, SliderCrank):
+        draw_slider_crank(cr, vp, mech, state)
     else:
         draw_four_bar(cr, vp, mech, state)
 

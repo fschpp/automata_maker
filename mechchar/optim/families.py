@@ -7,8 +7,9 @@ import numpy as np
 from mechchar.optim.fitcore import Family, FitResult, ProgressFn, fit
 from mechchar.optim.fivebar_fit import GEARED_FIVE_BAR
 from mechchar.optim.fourbar_fit import FOUR_BAR
+from mechchar.optim.slidercrank_fit import SLIDER_CRANK
 
-ALL_FAMILIES: tuple[Family, ...] = (FOUR_BAR, GEARED_FIVE_BAR)
+ALL_FAMILIES: tuple[Family, ...] = (FOUR_BAR, GEARED_FIVE_BAR, SLIDER_CRANK)
 
 
 def family_by_name(name: str) -> Family:

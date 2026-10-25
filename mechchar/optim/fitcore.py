@@ -403,6 +403,32 @@ class Throttle:
             self._fn(label, curve)
 
 
+def random_candidates(
+    family: Family,
+    y: np.ndarray,
+    n: int,
+    n_candidates: int,
+    n_keep: int,
+    rng: np.random.Generator,
+) -> list[Candidate]:
+    """Mejores candidatos aleatorios de una familia, ya alineados con el objetivo ``y``: se
+    muestrea en el marco local, se alinea por centro, escala y ejes principales y se ordena por
+    el error de la evaluación analítica."""
+    size = bbox_diag(y)
+    pool: list[tuple[float, np.ndarray, Variant, np.ndarray]] = []
+    chunk = 4000
+    for _ in range(max(1, n_candidates // chunk)):
+        s = family.sample_local(rng, chunk, n)
+        if s is None:
+            continue
+        for al in rank_aligned(s.curves, s.extent, y, n_keep):
+            i = al.index
+            p0 = family.assemble(s.shape[i], s.variants[i], al.scale, al.phi, al.origin)
+            pool.append((al.cost, p0, s.variants[i], al.curve))
+    pool.sort(key=lambda item: item[0])
+    return [Candidate(p0, v, cost / size, curve) for cost, p0, v, curve in pool[:n_keep]]
+
+
 def fit(
     target: np.ndarray,
     families: Sequence[Family],
