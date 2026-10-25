@@ -64,6 +64,43 @@ class GearBox:
         borde y la extensión se mide en un número finito de fases (0,1 % de la caja)."""
         return 1e-3 * max(self.width, self.height)
 
+    def translated(self, dx: float, dy: float) -> GearBox:
+        return GearBox(self.x0 + dx, self.y0 + dy, self.x1 + dx, self.y1 + dy)
+
+    def resized(self, handle: str, dx: float, dy: float, min_size: float) -> GearBox:
+        """Caja con los bordes de ``handle`` (``"n"``, ``"se"``, ...) corridos ``dx``, ``dy`` (la
+        «n» es el borde de arriba, y crece con ``y``). Nunca queda más angosta que ``min_size``:
+        el borde se detiene contra el opuesto en lugar de cruzarlo."""
+        x0, y0, x1, y1 = self.x0, self.y0, self.x1, self.y1
+        if "w" in handle:
+            x0 = min(x0 + dx, x1 - min_size)
+        if "e" in handle:
+            x1 = max(x1 + dx, x0 + min_size)
+        if "s" in handle:
+            y0 = min(y0 + dy, y1 - min_size)
+        if "n" in handle:
+            y1 = max(y1 + dy, y0 + min_size)
+        return GearBox(x0, y0, x1, y1)
+
+    def hit(self, point: tuple[float, float], tol: float) -> str | None:
+        """Qué se agarra de la caja en ``point``: una esquina (``"nw"``, ``"ne"``, ``"sw"``,
+        ``"se"``), un borde (``"n"``, ``"s"``, ``"e"``, ``"w"``), ``"move"`` si está adentro, o
+        ``None`` si está a más de ``tol`` de la caja. Los bordes agarran hasta ``tol`` desde el
+        borde, pero nunca más de un tercio del lado: en una caja chica siempre queda un centro
+        para moverla."""
+        x, y = point
+        if not (self.x0 - tol <= x <= self.x1 + tol and self.y0 - tol <= y <= self.y1 + tol):
+            return None
+        tx, ty = min(tol, self.width / 3.0), min(tol, self.height / 3.0)
+        ns = ew = ""
+        top, bottom = abs(y - self.y1), abs(y - self.y0)
+        left, right = abs(x - self.x0), abs(x - self.x1)
+        if min(top, bottom) <= ty:
+            ns = "n" if top <= bottom else "s"
+        if min(left, right) <= tx:
+            ew = "w" if left <= right else "e"
+        return ns + ew or "move"
+
     def worst_overshoot(self, bounds: Bounds) -> float:
         return max(self.overshoot(bounds))
 

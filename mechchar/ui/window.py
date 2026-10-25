@@ -185,7 +185,8 @@ class MainWindow(Gtk.ApplicationWindow):
         self.box_toggle = Gtk.ToggleButton(label="Caja")
         self.box_toggle.set_tooltip_text(
             "Caja de engranajes: activala y arrastrá en el lienzo para dibujar el rectángulo "
-            "donde tiene que caber el mecanismo."
+            "donde tiene que caber el mecanismo. Después, arrastrá desde adentro para moverla "
+            "y desde un borde o una esquina para cambiarle el tamaño."
         )
         self.box_toggle.connect("toggled", self._on_mode_toggled, "box")
         self.attach_toggle = Gtk.ToggleButton(label="Actuación")
@@ -848,6 +849,8 @@ class MainWindow(Gtk.ApplicationWindow):
                 self.canvas.drag_target = self.picker
         elif not any(t.get_active() for t in toggles.values()):
             self.canvas.drag_target = self.editor
+        self.box_editor.active = self.box_toggle.get_active()  # con la caja activa van las manijas
+        self.canvas.queue_draw()
 
     # --- puntos de actuación y marcador --------------------------------------
     def _update_pick_controls(self, busy: bool) -> None:
