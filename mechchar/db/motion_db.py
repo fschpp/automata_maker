@@ -328,3 +328,17 @@ def suggest(
         if len(out) == k:
             break
     return out
+
+
+def suggest_many(
+    dbs: Sequence[MotionDB],
+    curves: Sequence[np.ndarray],
+    k: int = 3,
+    prescreen: int = 150,
+    box: GearBox | None = None,
+) -> list[list[Suggestion]]:
+    """``suggest`` para varias curvas objetivo a la vez: la lista ``i`` son los candidatos de
+    ``curves[i]``. Pensado para una sola tarea en segundo plano (la interfaz descarta la anterior
+    si llega otra), de modo que todas las curvas se actualizan juntas al arrastrar. Es secuencial:
+    una consulta tarda ~40 ms y en una máquina de un solo núcleo los hilos no ganaron nada."""
+    return [suggest(dbs, c, k=k, prescreen=prescreen, box=box) for c in curves]

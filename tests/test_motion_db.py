@@ -12,6 +12,7 @@ from mechchar.db.motion_db import (
     poisson_disk_select,
     query,
     suggest,
+    suggest_many,
 )
 from mechchar.optim.curves import bbox_diag, chamfer_rms
 from mechchar.optim.families import FOUR_BAR, GEARED_FIVE_BAR
@@ -207,3 +208,17 @@ def test_suggest_merges_several_databases():
     assert 1 <= len(out) <= 3
     assert {s.family for s in out} <= {"four_bar", "geared_five_bar"}
     assert [s.distance for s in out] == sorted(s.distance for s in out)
+
+
+def test_suggest_many_answers_each_curve_like_suggest_does(db4):
+    curves = [entry_curve(db4, i) for i in (3, 40, 211)] + [ELLIPSE * 2.0]
+    many = suggest_many([db4], curves, k=2)
+    assert len(many) == len(curves)
+    for curve, got in zip(curves, many, strict=True):
+        want = suggest([db4], curve, k=2)
+        assert [(g.family, g.distance) for g in got] == [(w.family, w.distance) for w in want]
+    assert all(len(m) == 2 for m in many)
+
+
+def test_suggest_many_with_no_curves_is_empty(db4):
+    assert suggest_many([db4], []) == []
