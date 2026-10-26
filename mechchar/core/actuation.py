@@ -27,6 +27,11 @@ from mechchar.core.character import Character, PointRef
 RANK_TOL = 1e-8
 NULL_RCOND = 1e-9
 MIN_REACH = 0.05  # por debajo, el marcador casi no se mueve en una de las dos direcciones
+# Por debajo de esto (σ2/σ1 de la movilidad de un punto) el punto está en una pose casi singular:
+# se mueve en 2 direcciones solo en primer orden y en una de ellas apenas. Medido en tres casos
+# (pierna 0,016 y Pushing Man con la mano en una esquina 0,080: malos; Pushing Man corregido
+# 0,419: bueno), así que es un umbral inicial.
+MIN_CONDITION = 0.1
 SUGGEST_FRACTIONS = (0.25, 0.5, 0.75)  # posiciones sobre el eje de cada pieza
 
 
@@ -101,6 +106,18 @@ def point_mobility(character: Character, ref: PointRef) -> int:
     return int(np.linalg.matrix_rank(m, tol=RANK_TOL))
 
 
+def mobility_condition(character: Character, ref: PointRef) -> float:
+    """Qué tan parejo se mueve un punto en sus dos direcciones, de 0 a 1: la razón entre el menor
+    y el mayor valor singular de su movilidad (``P · N``). Cerca de 1, igual de fácil en cualquier
+    dirección; cerca de 0, en reposo está casi en una posición singular (una esquina de su zona
+    alcanzable) aunque el rango diga 2. 0 si se mueve en menos de 2 direcciones."""
+    basis = _dof_basis(character)
+    if basis.shape[1] < 2:
+        return 0.0
+    sv = np.linalg.svd(_mobility_matrix(character, ref, basis), compute_uv=False)
+    return float(sv[-1] / sv[0]) if sv[0] > RANK_TOL and sv[-1] > RANK_TOL else 0.0
+
+
 def reach(character: Character, attach: PointRef, marker: PointRef) -> float:
     """Qué tan bien el movimiento del punto de actuación se traduce en el del marcador, de 0 a 1.
 
@@ -130,6 +147,10 @@ class ActuationAdvice:
     marker_rank: int
     reach: float
     messages: tuple[str, ...]
+    # lo que sigue tiene valor por defecto para no romper a quien arma un consejo a mano
+    attach_condition: float = 0.0
+    marker_condition: float = 0.0
+    warnings: tuple[str, ...] = ()  # los avisos entre los mensajes (el ajuste sigue permitido)
 
     @property
     def text(self) -> str:
@@ -162,19 +183,36 @@ def advise(character: Character, attach: PointRef, marker: PointRef) -> Actuatio
         ok = False
         msgs.append(f"El marcador en «{marker.part}» no se mueve: su curva sería un punto.")
     r = reach(character, attach, marker) if ok else 0.0
-    if ok and r < MIN_REACH:
-        msgs.append(
+    a_cond = mobility_condition(character, attach) if ok else 0.0
+    m_cond = mobility_condition(character, marker) if ok else 0.0
+    warns: list[str] = []
+    if ok and a_cond < MIN_CONDITION:
+        warns.append(
+            f"El punto de actuación en «{attach.part}» está en una pose casi singular "
+            f"(condición {a_cond:.2f}): desde el reposo casi no puede moverse en una dirección."
+        )
+    if ok and m_cond < MIN_CONDITION:
+        warns.append(
+            f"El marcador en «{marker.part}» está en una pose casi singular (condición "
+            f"{m_cond:.2f}): desde el reposo casi no puede moverse en una dirección, y cuesta "
+            "seguir curvas que lo rodean. Probá otro punto o cambiá la pose de reposo."
+        )
+    elif ok and r < MIN_REACH:
+        warns.append(
             "Con este punto de actuación el marcador casi solo se mueve en una dirección (en "
             "reposo): puede costar que siga una curva ancha como una elipse."
         )
     if ok and dof > 2:
-        msgs.append(
+        warns.append(
             f"Con un solo mecanismo quedan {dof - 2} grados de libertad sin controlar: "
             "hace falta otro mecanismo (o más puntos de actuación)."
         )
+    msgs += warns
     if ok and not msgs:
         msgs.append("El punto de actuación y el marcador se pueden usar.")
-    return ActuationAdvice(ok, dof, a_rank, m_rank, r, tuple(msgs))
+    return ActuationAdvice(
+        ok, dof, a_rank, m_rank, r, tuple(msgs), a_cond, m_cond, tuple(warns)
+    )
 
 
 # --- sugerencias --------------------------------------------------------------------------------

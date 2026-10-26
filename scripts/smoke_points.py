@@ -59,6 +59,9 @@ def script(win, tmp: Path):
     check("shank" in win.props.get_label() and "foot" in win.props.get_label(),
           "el panel nombra la actuación y el marcador por defecto")
     check(win.attach_ref == LEG_ATTACH and win.marker_ref == LEG_MARKER, "puntos por defecto")
+    label = win.props.get_label()
+    check("condición" in label and "casi singular" in label and "b26a00" in label,
+          "el panel muestra la condición y avisa (en naranja) que el pie está en una pose casi singular")
     render(win, "/tmp/shot_points_0_inicio.png")
 
     # 1. modos del lienzo, excluyentes

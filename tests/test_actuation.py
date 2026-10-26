@@ -187,3 +187,89 @@ def test_project_rejects_malformed_picked_points(tmp_path, bad) -> None:
     path.write_text(json.dumps(raw))
     with pytest.raises(ValueError):
         load_project(path)
+
+
+# --- condicionamiento en reposo ----------------------------------------------------------------
+
+
+def _straight_arm(bend: float) -> Character:
+    """Brazo de dos eslabones con la cadera fija: con ``bend`` chico queda casi estirado."""
+    import numpy as np
+
+    from mechchar.core.character import Pivot, _link
+
+    elbow = (1.0, 0.0)
+    hand = (1.0 + math.cos(bend), math.sin(bend))
+    base = Part("base", 0, 0, 0, [(-0.2, -0.2), (0.2, -0.2), (0.2, 0.2), (-0.2, 0.2)], fixed=True)
+    parts = [base, _link("upper", (0.0, 0.0), elbow), _link("fore", elbow, hand)]
+    pivots = [Pivot("base", "upper", (0.0, 0.0)), Pivot("upper", "fore", elbow)]
+    assert np.isfinite(hand).all()
+    return Character("brazo", parts, pivots)
+
+
+def test_condition_is_zero_when_a_point_moves_in_fewer_than_two_directions() -> None:
+    from mechchar.core.actuation import mobility_condition
+
+    leg = leg_character()
+    assert mobility_condition(leg, THIGH_MID) == 0.0  # 1 dirección
+    assert mobility_condition(leg, PELVIS) == 0.0  # fija
+
+
+def test_condition_tells_a_stretched_arm_from_a_bent_one() -> None:
+    from mechchar.core.actuation import mobility_condition
+
+    tip = PointRef("fore", (1.0 + math.cos(0.05), math.sin(0.05)))
+    stretched = mobility_condition(_straight_arm(0.05), tip)
+    bent = mobility_condition(
+        _straight_arm(1.0), PointRef("fore", (1.0 + math.cos(1.0), math.sin(1.0)))
+    )
+    assert 0.0 < stretched < 0.1 < 0.3 < bent <= 1.0
+
+
+def test_advice_warns_about_a_nearly_singular_marker_but_still_allows_the_fit() -> None:
+    arm = _straight_arm(0.05)
+    tip = PointRef("fore", (1.0 + math.cos(0.05), math.sin(0.05)))
+    mid = PointRef("fore", (1.0 + 0.5 * math.cos(0.05), 0.5 * math.sin(0.05)))
+    advice = advise(arm, mid, tip)
+    assert advice.ok  # sigue permitido: es un aviso
+    assert advice.marker_condition < 0.1
+    assert any("casi singular" in w for w in advice.warnings)
+    assert "casi singular" in advice.text
+
+
+def test_the_default_leg_marker_is_flagged_without_repeating_the_reach_warning() -> None:
+    advice = advise(leg_character(), LEG_ATTACH, LEG_MARKER)
+    assert advice.ok and advice.marker_condition < 0.1
+    assert len(advice.warnings) == 1  # el aviso nuevo reemplaza al de alcance, no se suman
+    assert "casi singular" in advice.warnings[0]
+
+
+def test_a_well_conditioned_character_has_no_warnings() -> None:
+    from mechchar.core.character import PUSHING_MAN_SPEC
+
+    spec = PUSHING_MAN_SPEC
+    advice = advise(spec.factory(()), spec.attach, spec.marker)
+    assert advice.ok and advice.warnings == ()
+    assert advice.marker_condition > 0.3 and advice.attach_condition > 0.3
+    assert advice.text == "El punto de actuación y el marcador se pueden usar."
+
+
+def test_the_original_pushing_man_defect_is_now_detected(monkeypatch) -> None:
+    """Con el antebrazo casi horizontal la mano estaba en una esquina de su zona alcanzable y
+    ``advise`` decía «se pueden usar» (el alcance daba 0,067, sobre el umbral de 0,05)."""
+    import mechchar.core.character as ch_mod
+
+    monkeypatch.setattr(ch_mod, "_PM_HAND", (1.5, 0.9))
+    ch = ch_mod.pushing_man_character()
+    attach = PointRef("forearm", (1.12, 0.87))
+    marker = PointRef("forearm", (1.5, 0.9))
+    advice = advise(ch, attach, marker)
+    assert advice.ok and advice.reach > 0.05  # el aviso de alcance viejo no lo veía
+    assert advice.marker_condition < 0.1
+    assert any("casi singular" in w for w in advice.warnings)
+
+
+def test_condition_warnings_do_not_hide_a_hard_failure() -> None:
+    advice = advise(leg_character(), THIGH_MID, LEG_MARKER)
+    assert not advice.ok and advice.warnings == ()
+    assert advice.attach_condition == 0.0

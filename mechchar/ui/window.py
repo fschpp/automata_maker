@@ -1092,7 +1092,11 @@ class MainWindow(Gtk.ApplicationWindow):
             )
             lines.append(f"Cambios: {edits}")
         lines.append("")
-        for title, ref in (("Punto de actuación", self.attach_ref), ("Marcador", self.marker_ref)):
+        points = (
+            ("Punto de actuación", self.attach_ref, self.advice.attach_condition),
+            ("Marcador", self.marker_ref, self.advice.marker_condition),
+        )
+        for title, ref, cond in points:
             part = leg.parts[leg.index(ref.part)]
             mob = point_mobility(leg, ref)
             lines.append(f"<b>{title}</b>")
@@ -1100,9 +1104,17 @@ class MainWindow(Gtk.ApplicationWindow):
                 f"«{esc(ref.part)}» en ({ref.point[0]:.2f}, {ref.point[1]:.2f})"
                 f" · plano z = {part.z:g}" + (" · fija" if part.fixed else "")
             )
-            lines.append(f"Se mueve en {mob} dirección(es) independiente(s)")
+            lines.append(
+                f"Se mueve en {mob} dirección(es) independiente(s)"
+                + (f" · condición {cond:.2f}" if mob == 2 and self.advice.ok else "")
+            )
             lines.append("")
-        color = "#1a7f37" if self.advice.ok else "#b3261e"
+        if not self.advice.ok:
+            color = "#b3261e"  # no se puede ajustar
+        elif self.advice.warnings:
+            color = "#b26a00"  # se puede, con reparos
+        else:
+            color = "#1a7f37"
         lines.append(f'<span foreground="{color}">{esc(self.advice.text)}</span>')
         if self.fit_result is not None:
             lines += ["", "<b>Ajuste</b>", esc(describe(self.fit_result)),

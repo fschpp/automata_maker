@@ -67,6 +67,9 @@ def script(win, tmp: Path):
     check("Pushing Man" in win.status.get_text() or "mano" in win.status.get_text(),
           "el texto de ayuda es el de la figura")
     check(win.reach_ok, "la curva por defecto está al alcance")
+    label = win.props.get_label()
+    check("condición" in label and "casi singular" not in label and "1a7f37" in label,
+          "el panel muestra la condición y, sin avisos, el diagnóstico va en verde")
     check(not win.phase_row.get_visible(), "no hay sliders de desfase (no es el bípedo)")
     render(win, "/tmp/shot_pm_0_inicio.png")
 
