@@ -21,10 +21,13 @@ from mechchar.core.character import (  # noqa: E402
     LEG_ATTACH,
     LEG_DEFAULT_ELLIPSE,
     LEG_MARKER,
+    PartOverride,
     PointRef,
+    apply_overrides,
     biped_character,
     leg_character,
     leg_refs,
+    merge_override,
     prefix_pose,
 )
 from mechchar.core.kinematics import ReachReport, reach_report  # noqa: E402
@@ -135,6 +138,9 @@ class MainWindow(Gtk.ApplicationWindow):
         self.attach_ref: PointRef = LEG_ATTACH
         self.marker_ref: PointRef = LEG_MARKER
         self.advice: ActuationAdvice | None = None
+        # Cambios del usuario sobre las piezas (z y fijas) de la pierna sola; el bípedo los hereda.
+        self.part_overrides: tuple[PartOverride, ...] = ()
+        self._updating_part_controls = False
         self._suggest_i = 0
         self._updating_mode = False
         self.active_leg: int | None = None  # mecanismo cuyo slider de desfase se movió último
@@ -272,8 +278,41 @@ class MainWindow(Gtk.ApplicationWindow):
         scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         scroller.set_min_content_width(280)
         scroller.set_child(self.props)
+        scroller.set_vexpand(True)
+
+        # Edición de una pieza: plano de profundidad z y si es fija (chasis).
+        self.part_names = [part.name for part in leg_character().parts]
+        self.part_dropdown = Gtk.DropDown.new_from_strings(self.part_names)
+        self.part_z = Gtk.SpinButton.new_with_range(-10.0, 10.0, 0.5)
+        self.part_z.set_digits(1)
+        self.part_z.set_tooltip_text(
+            "Plano de profundidad z de la pieza (la simulación sigue siendo 2D por plano)"
+        )
+        self.part_fixed = Gtk.CheckButton(label="Fija (chasis)")
+        self.part_fixed.set_tooltip_text(
+            "Una pieza fija no se mueve: el mecanismo no puede accionarla"
+        )
+        self.part_dropdown.connect("notify::selected", lambda *_a: self._sync_part_controls())
+        self.part_z.connect("value-changed", self._on_part_z_changed)
+        self.part_fixed.connect("toggled", self._on_part_fixed_toggled)
+        self.part_controls = (self.part_dropdown, self.part_z, self.part_fixed)
+        for widget in self.part_controls:
+            widget.set_sensitive(False)
+        editor_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        editor_row.append(Gtk.Label(label="Pieza"))
+        editor_row.append(self.part_dropdown)
+        editor_row.append(Gtk.Label(label="z"))
+        editor_row.append(self.part_z)
+        part_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        part_box.append(editor_row)
+        part_box.append(self.part_fixed)
+        for margin in ("start", "end", "top", "bottom"):
+            getattr(part_box, f"set_margin_{margin}")(8)
+        side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        side.append(part_box)
+        side.append(scroller)
         self.props_frame = Gtk.Frame(label="Propiedades")
-        self.props_frame.set_child(scroller)
+        self.props_frame.set_child(side)
         self.props_frame.set_visible(False)
         middle = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
         middle.append(self.canvas)
@@ -388,7 +427,8 @@ class MainWindow(Gtk.ApplicationWindow):
             rest = character.build()[1]
             draw_character(cr, vp, character, rest, [self.attach_ref, self.marker_ref])
             if self.biped:  # el ajuste se hace sobre una pierna; el bípedo se arma al terminar
-                draw_character(cr, vp, biped_character(), biped_character().build()[1])
+                biped = biped_character(self.part_overrides)
+                draw_character(cr, vp, biped, biped.build()[1])
         self.editor.draw(cr, vp)
         self.box_editor.draw(cr, vp)
         if self.suggestions and self.progress is None:
@@ -533,7 +573,7 @@ class MainWindow(Gtk.ApplicationWindow):
             leg_pose = prefix_pose(pose, prefix) if pose is not None else None
             specs.append(SubSpec(prefix + "leg", built, mech, attach, marker, leg_pose))
         try:
-            return MultiRig(biped_character(), specs)
+            return MultiRig(biped_character(self.part_overrides), specs)
         except ValueError as exc:
             self.status.set_text(f"No se pudo armar el bípedo: {exc}")
             return None
@@ -606,6 +646,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.phase_row.set_visible(self.biped)
         vp = self.canvas.viewport
         self.attach_ref, self.marker_ref, self._suggest_i = LEG_ATTACH, LEG_MARKER, 0
+        self.part_overrides = ()
         if index in (1, 2):
             self._rebuild_leg_families()
             cx, cy, ea, eb = LEG_DEFAULT_ELLIPSE
@@ -663,6 +704,7 @@ class MainWindow(Gtk.ApplicationWindow):
             phases,
             attach,
             marker,
+            self.part_overrides if self.leg_families else (),
         )
 
     def _commit(self, key: str | None = None) -> None:
@@ -723,6 +765,7 @@ class MainWindow(Gtk.ApplicationWindow):
             else:
                 self._clear_result()
             if self.leg_families:
+                self.part_overrides = self._valid_parts(state.parts)
                 self._apply_picks(state.attach, state.marker)
             self.editor.points = list(state.spline)
             b = state.box
@@ -855,15 +898,19 @@ class MainWindow(Gtk.ApplicationWindow):
     # --- puntos de actuación y marcador --------------------------------------
     def _update_pick_controls(self, busy: bool) -> None:
         enabled = bool(self.leg_families) and not busy
-        for widget in self.pick_controls:
+        for widget in (*self.pick_controls, *self.part_controls):
             widget.set_sensitive(enabled)
         if not self.leg_families:  # sin personaje no hay nada que elegir
             for toggle in (self.attach_toggle, self.marker_toggle):
                 toggle.set_active(False)
 
+    def _leg(self) -> Any:
+        """La pierna de prueba con los cambios del usuario sobre sus piezas."""
+        return leg_character(self.part_overrides)
+
     def _rebuild_leg_families(self) -> None:
         """Arma las familias con personaje para los puntos elegidos y rehace el diagnóstico."""
-        leg = leg_character()
+        leg = self._leg()
         self.leg_families = tuple(
             CharacterFamily(base, leg, self.attach_ref, self.marker_ref) for base in ALL_FAMILIES
         )
@@ -925,7 +972,7 @@ class MainWindow(Gtk.ApplicationWindow):
     def _apply_picks(self, attach: PointPick | None, marker: PointPick | None) -> None:
         """Pone los puntos de una foto (``None`` = los de la escena); si una pieza ya no existe,
         usa el punto por defecto y lo avisa."""
-        leg = leg_character()
+        leg = self._leg()
         refs: list[PointRef] = []
         for pick, default in ((attach, LEG_ATTACH), (marker, LEG_MARKER)):
             if pick is None:
@@ -941,6 +988,70 @@ class MainWindow(Gtk.ApplicationWindow):
         self.attach_ref, self.marker_ref = refs
         self._rebuild_leg_families()
 
+    def _valid_parts(self, parts: tuple[PartOverride, ...]) -> tuple[PartOverride, ...]:
+        """Los cambios de una foto, o ninguno (con aviso) si nombran una pieza que no existe."""
+        try:
+            apply_overrides(leg_character(), parts)
+        except ValueError as exc:
+            self.status.set_text(f"Se ignoraron los cambios de piezas del proyecto: {exc}.")
+            return ()
+        return parts
+
+    def _selected_part(self) -> str:
+        return self.part_names[self.part_dropdown.get_selected()]
+
+    def _sync_part_controls(self) -> None:
+        """Muestra en los controles los valores de la pieza elegida (sin disparar cambios)."""
+        if not self.leg_families:
+            return
+        leg = self.picker.character
+        if leg is None:
+            return
+        part = leg.parts[leg.index(self._selected_part())]
+        self._updating_part_controls = True
+        try:
+            self.part_z.set_value(part.z)
+            self.part_fixed.set_active(part.fixed)
+        finally:
+            self._updating_part_controls = False
+
+    def _on_part_z_changed(self, spin: Gtk.SpinButton) -> None:
+        if not self._updating_part_controls:
+            self.set_part_props(self._selected_part(), z=float(spin.get_value()))
+
+    def _on_part_fixed_toggled(self, check: Gtk.CheckButton) -> None:
+        if not self._updating_part_controls:
+            self.set_part_props(self._selected_part(), fixed=bool(check.get_active()))
+
+    def set_part_props(
+        self, name: str, z: float | None = None, fixed: bool | None = None
+    ) -> None:
+        """Cambia el plano z y/o si una pieza es fija. El mecanismo ajustado deja de valer (el
+        personaje cambió) y se quita; el diagnóstico de grados de libertad se rehace."""
+        leg = self.picker.character
+        if not self.leg_families or leg is None:
+            return
+        if self.runner.busy:
+            self.status.set_text("Esperá a que termine el ajuste para editar las piezas.")
+            self._sync_part_controls()
+            return
+        current = leg.parts[leg.index(name)]
+        if (z is None or z == current.z) and (fixed is None or fixed == current.fixed):
+            return
+        self.part_overrides = merge_override(self.part_overrides, name, z=z, fixed=fixed)
+        self._clear_result()
+        self._rebuild_leg_families()
+        assert self.advice is not None
+        new_leg = self.picker.character
+        assert new_leg is not None
+        edited = new_leg.parts[new_leg.index(name)]
+        self.status.set_text(
+            f"«{name}»: z = {edited.z:g}, {'fija' if edited.fixed else 'móvil'}. "
+            + self.advice.text
+        )
+        self._commit(f"part:{name}")
+        self.canvas.queue_draw()
+
     def _refresh_properties(self) -> None:
         """Panel de propiedades: personaje, puntos elegidos, diagnóstico y estado del ajuste."""
         self.props_frame.set_visible(bool(self.leg_families))
@@ -948,6 +1059,7 @@ class MainWindow(Gtk.ApplicationWindow):
         if not self.leg_families or leg is None or self.advice is None:
             self.props.set_text("")
             return
+        self._sync_part_controls()
         esc = GLib.markup_escape_text
         n_fixed = sum(1 for part in leg.parts if part.fixed)
         lines = [
@@ -955,8 +1067,16 @@ class MainWindow(Gtk.ApplicationWindow):
             f"{len(leg.parts)} piezas ({n_fixed} fija)" if n_fixed == 1
             else f"{len(leg.parts)} piezas ({n_fixed} fijas)",
             f"Grados de libertad solo: {self.advice.dof}",
-            "",
         ]
+        if self.part_overrides:
+            edits = ", ".join(
+                f"{esc(ov.name)}"
+                + (f" z={ov.z:g}" if ov.z is not None else "")
+                + ("" if ov.fixed is None else (" fija" if ov.fixed else " móvil"))
+                for ov in self.part_overrides
+            )
+            lines.append(f"Cambios: {edits}")
+        lines.append("")
         for title, ref in (("Punto de actuación", self.attach_ref), ("Marcador", self.marker_ref)):
             part = leg.parts[leg.index(ref.part)]
             mob = point_mobility(leg, ref)

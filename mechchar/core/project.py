@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Generic, TypeVar
 
+from mechchar.core.character import PartOverride
+
 FORMAT_VERSION = 1
 MAX_PARAMS = 64  # cota holgada: las familias actuales usan menos de 16
 MAX_POINTS = 256
@@ -91,6 +93,9 @@ class ProjectState:
     # Opcionales: los proyectos anteriores no los traen y se abren igual.
     attach: PointPick | None = None
     marker: PointPick | None = None
+    # Cambios del usuario sobre las piezas del personaje (``z`` y piezas fijas), sobre la pierna
+    # sola. Opcional: los proyectos anteriores no los traen y se abren igual.
+    parts: tuple[PartOverride, ...] = ()
 
     def __post_init__(self) -> None:
         if self.scene < 0:
@@ -108,6 +113,9 @@ class ProjectState:
             if not (x0 < x1 and y0 < y1):
                 raise ValueError("la caja de engranajes está mal formada")
         _finite(self.phases, "desfases")
+        names = [ov.name for ov in self.parts]
+        if len(set(names)) != len(names):
+            raise ValueError("hay dos cambios para la misma pieza")
 
     # --- JSON -------------------------------------------------------------------------------
     def to_dict(self) -> dict[str, Any]:
@@ -128,6 +136,7 @@ class ProjectState:
             "phases": list(self.phases),
             "attach": None if self.attach is None else self.attach.to_dict(),
             "marker": None if self.marker is None else self.marker.to_dict(),
+            "parts": [ov.to_dict() for ov in self.parts],
         }
 
     @classmethod
@@ -158,8 +167,9 @@ class ProjectState:
                 _finite(d.get("phases", ()), "desfases"),
                 None if d.get("attach") is None else PointPick.from_dict(d["attach"]),
                 None if d.get("marker") is None else PointPick.from_dict(d["marker"]),
+                tuple(PartOverride.from_dict(ov) for ov in d.get("parts") or ()),
             )
-        except (KeyError, TypeError) as exc:
+        except (KeyError, TypeError, AttributeError) as exc:
             raise ValueError(f"proyecto incompleto o mal formado ({exc!r})") from exc
 
 

@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass, field
+from collections.abc import Sequence
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -155,6 +156,83 @@ class Character:
         return cls.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
 
 
+# --- cambios del usuario sobre las piezas -------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PartOverride:
+    """Lo que el usuario cambió en una pieza desde el panel de propiedades: el plano de
+    profundidad ``z`` y/o si es fija (chasis). ``None`` deja el valor que trae el personaje. Es
+    inmutable y comparable, así que entra tal cual en las fotos del historial."""
+
+    name: str
+    z: float | None = None
+    fixed: bool | None = None
+
+    def __post_init__(self) -> None:
+        if not self.name:
+            raise ValueError("el cambio de pieza no tiene nombre")
+        if self.z is not None and not math.isfinite(self.z):
+            raise ValueError(f"{self.name}: z no es un número finito")
+
+    @property
+    def is_noop(self) -> bool:
+        return self.z is None and self.fixed is None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"name": self.name, "z": self.z, "fixed": self.fixed}
+
+    @classmethod
+    def from_dict(cls, raw: Any) -> PartOverride:
+        z, fixed = raw.get("z"), raw.get("fixed")
+        return cls(
+            str(raw["name"]),
+            None if z is None else float(z),
+            None if fixed is None else bool(fixed),
+        )
+
+
+def apply_overrides(character: Character, overrides: Sequence[PartOverride]) -> Character:
+    """Copia de ``character`` con los cambios aplicados; el original no se toca. ValueError si
+    un cambio nombra una pieza que no existe o dos cambios nombran la misma."""
+    names = {p.name for p in character.parts}
+    seen: set[str] = set()
+    for ov in overrides:
+        if ov.name not in names:
+            raise ValueError(f"el cambio nombra una pieza que no existe: {ov.name!r}")
+        if ov.name in seen:
+            raise ValueError(f"hay dos cambios para la pieza {ov.name!r}")
+        seen.add(ov.name)
+    by_name = {ov.name: ov for ov in overrides}
+    parts = []
+    for part in character.parts:
+        edit = by_name.get(part.name)
+        if edit is None:
+            parts.append(replace(part))
+            continue
+        parts.append(
+            replace(
+                part,
+                z=part.z if edit.z is None else edit.z,
+                fixed=part.fixed if edit.fixed is None else edit.fixed,
+            )
+        )
+    return Character(character.name, parts, [replace(pv) for pv in character.pivots])
+
+
+def merge_override(
+    overrides: Sequence[PartOverride], name: str, *, z: float | None = None,
+    fixed: bool | None = None,
+) -> tuple[PartOverride, ...]:
+    """Suma un cambio de ``z`` y/o ``fixed`` a la lista (reemplaza lo anterior de esa pieza)."""
+    current = next((ov for ov in overrides if ov.name == name), PartOverride(name))
+    merged = PartOverride(
+        name, current.z if z is None else z, current.fixed if fixed is None else fixed
+    )
+    rest = tuple(ov for ov in overrides if ov.name != name)
+    return rest if merged.is_noop else (*rest, merged)
+
+
 # --- unión con un mecanismo ---------------------------------------------------------------------
 
 
@@ -264,7 +342,7 @@ def _pelvis() -> Part:
     return Part("pelvis", 0.0, 0.0, 0.0, outline, fixed=True)
 
 
-def leg_character() -> Character:
+def leg_character(overrides: Sequence[PartOverride] = ()) -> Character:
     """Pierna de prueba (vista lateral): cadera fija, muslo, pantorrilla, pie y una varilla pasiva
     del muslo al pie. Sola tiene 2 grados de libertad (el ángulo del muslo y el del lazo
     muslo-pantorrilla-pie-varilla), de modo que un mecanismo unido por un pasador a un punto de
@@ -274,17 +352,32 @@ def leg_character() -> Character:
     estirada, o con el enganche pegado al tobillo, el reposo queda en el borde de la zona
     alcanzable y el mecanismo no puede moverla en todas las direcciones."""
     parts, pivots = _leg_chain()
-    return Character("pierna", [_pelvis(), *parts], pivots)
+    return apply_overrides(Character("pierna", [_pelvis(), *parts], pivots), overrides)
 
 
-def biped_character() -> Character:
+def biped_character(overrides: Sequence[PartOverride] = ()) -> Character:
     """Bípedo de prueba: una pelvis fija y dos piernas idénticas (prefijos ``l_`` y ``r_``) en
     planos de profundidad distintos (z = 0 y 1), como las patas de cada lado del cuadrúpedo del
     video. En la simulación 2D se superponen; solo se distinguen por ``z``. Solo tiene 4 grados
-    de libertad: 2 por pierna."""
+    de libertad: 2 por pierna.
+
+    ``overrides`` son los cambios hechos sobre la pierna sola (nombres sin prefijo, como en el
+    panel): ``fixed`` vale para las dos piernas y ``z`` se suma al plano de cada una (es un
+    corrimiento respecto del plano que la pierna sola trae, 0), para no mezclarlas; los de la
+    pelvis, que es una sola, se aplican tal cual."""
     left, left_pivots = _leg_chain("l_", z=0.0)
     right, right_pivots = _leg_chain("r_", z=1.0)
-    return Character("bipedo", [_pelvis(), *left, *right], [*left_pivots, *right_pivots])
+    character = Character("bipedo", [_pelvis(), *left, *right], [*left_pivots, *right_pivots])
+    expanded: list[PartOverride] = []
+    for ov in overrides:
+        if ov.name == "pelvis":
+            expanded.append(ov)
+            continue
+        for prefix, base_z in (("l_", 0.0), ("r_", 1.0)):
+            expanded.append(
+                PartOverride(prefix + ov.name, None if ov.z is None else base_z + ov.z, ov.fixed)
+            )
+    return apply_overrides(character, expanded)
 
 
 def leg_refs(
