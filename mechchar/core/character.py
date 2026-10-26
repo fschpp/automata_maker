@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -355,6 +355,54 @@ def leg_character(overrides: Sequence[PartOverride] = ()) -> Character:
     return apply_overrides(Character("pierna", [_pelvis(), *parts], pivots), overrides)
 
 
+_PM_HIP, _PM_SHOULDER = (0.0, 0.0), (0.3, 1.5)
+_PM_ELBOW, _PM_HAND = (0.75, 0.85), (1.28, 0.32)
+_PM_STRUT_BASE, _PM_STRUT_ARM = (-0.35, 0.15), (0.55, 1.14)
+
+
+def pushing_man_character(overrides: Sequence[PartOverride] = ()) -> Character:
+    """Figura que empuja (vista lateral, mirando a la derecha), en la línea del Pushing Man del
+    video: un chasis fijo (cadera y piernas), un torso que se inclina desde la cadera, un brazo
+    unido al hombro, un antebrazo con la mano, y una barra pasiva del chasis al brazo que cierra
+    un cuadrilátero con el torso (así el cuerpo y el brazo se mueven acoplados). Sola tiene 2
+    grados de libertad (el cuadrilátero y el codo), de modo que un mecanismo unido por un pasador
+    a un punto del antebrazo la deja con 0.
+
+    El antebrazo apunta 45° hacia abajo en reposo. Con la mano casi horizontal (4°) quedaba en una
+    esquina de la zona que alcanza (sin margen hacia adelante y 0,04 hacia arriba, segundo valor
+    singular de la movilidad 0,07): la mano estaba en el punto más a la derecha del círculo que
+    describe el antebrazo y mover una articulación casi no la desplazaba en x. Inclinado, el
+    segundo valor singular sube a 0,33 y la mano puede alejarse 0,2 hacia adelante y 0,4 hacia
+    abajo desde el reposo."""
+    hip, shoulder, elbow, hand = _PM_HIP, _PM_SHOULDER, _PM_ELBOW, _PM_HAND
+    base = Part(
+        "base", 0.0, 0.0, 0.0,
+        [(-0.6, 0.3), (0.6, 0.3), (0.6, -1.6), (0.2, -1.6), (0.2, -0.4), (-0.2, -0.4),
+         (-0.2, -1.6), (-0.6, -1.6)],
+        fixed=True,
+    )
+    parts = [
+        base,
+        _link("torso", hip, shoulder),
+        _link("arm", shoulder, elbow),
+        _link("forearm", elbow, hand),
+        _link("strut", _PM_STRUT_BASE, _PM_STRUT_ARM),
+    ]
+    pivots = [
+        Pivot("base", "torso", hip),
+        Pivot("torso", "arm", shoulder),
+        Pivot("arm", "forearm", elbow),
+        Pivot("base", "strut", _PM_STRUT_BASE),
+        Pivot("arm", "strut", _PM_STRUT_ARM),
+    ]
+    return apply_overrides(Character("pushing_man", parts, pivots), overrides)
+
+
+PUSHING_MAN_ATTACH = PointRef("forearm", (1.015, 0.585))  # a mitad del antebrazo
+PUSHING_MAN_MARKER = PointRef("forearm", _PM_HAND)  # la mano
+PUSHING_MAN_DEFAULT_ELLIPSE = (0.95, 0.7, 0.3, 0.18)  # centro x, y y semiejes: ajusta a ~0,4 %
+
+
 def biped_character(overrides: Sequence[PartOverride] = ()) -> Character:
     """Bípedo de prueba: una pelvis fija y dos piernas idénticas (prefijos ``l_`` y ``r_``) en
     planos de profundidad distintos (z = 0 y 1), como las patas de cada lado del cuadrúpedo del
@@ -410,3 +458,40 @@ LEG_DEFAULT_ELLIPSE = (1.0, -2.05, 0.35, 0.15)
 # Puntos de la pierna de prueba: dónde se une el mecanismo y qué punto debe seguir la curva.
 LEG_ATTACH = PointRef("shank", (0.45, -1.8))  # medio de la pantorrilla
 LEG_MARKER = PointRef("foot", (0.9, -2.5))  # punta del pie
+
+
+@dataclass(frozen=True)
+class CharacterSpec:
+    """Un personaje de prueba con lo que la escena necesita para trabajar con él: cómo armarlo
+    (con los cambios del usuario sobre sus piezas), el punto de actuación y el marcador por
+    defecto, la curva objetivo inicial (elipse: centro x, y y semiejes), la zona que se ve al
+    abrir la escena y el texto de ayuda."""
+
+    key: str
+    label: str
+    factory: Callable[[Sequence[PartOverride]], Character]
+    attach: PointRef
+    marker: PointRef
+    ellipse: tuple[float, float, float, float]
+    view: tuple[float, float, float, float]  # x0, y0, x1, y1
+    intro: str
+    who: str  # «la pierna»: para los avisos de alcance («fuera del alcance de la pierna»)
+    reach_zone: str  # dónde tiene que quedar la curva («la franja diagonal que alcanza el pie»)
+
+
+LEG_SPEC = CharacterSpec(
+    "leg", "Pierna de prueba", leg_character, LEG_ATTACH, LEG_MARKER, LEG_DEFAULT_ELLIPSE,
+    (-1.5, -3.2, 2.5, 0.6),
+    "Pierna de prueba: arrastrá la curva que debe dibujar la punta del pie (punto rojo); el "
+    "naranja es donde se une el mecanismo. Podés cambiarlos con «Actuación» y «Marcador». El pie "
+    "solo llega a una franja diagonal: te aviso si la curva se sale. Presioná «Ajustar».",
+    "la pierna", "la franja diagonal que alcanza el pie",
+)
+PUSHING_MAN_SPEC = CharacterSpec(
+    "pushing_man", "Pushing Man", pushing_man_character, PUSHING_MAN_ATTACH, PUSHING_MAN_MARKER,
+    PUSHING_MAN_DEFAULT_ELLIPSE, (-1.5, -2.0, 2.5, 2.2),
+    "Pushing Man: arrastrá la curva que debe dibujar la mano (punto rojo); el naranja es donde "
+    "se une el mecanismo. Podés cambiarlos con «Actuación» y «Marcador». La mano solo llega a "
+    "una zona del plano: te aviso si la curva se sale. Presioná «Ajustar».",
+    "la figura", "la zona que alcanza la mano",
+)

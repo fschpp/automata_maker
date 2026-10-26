@@ -18,14 +18,13 @@ from mechchar.core.actuation import (  # noqa: E402
     suggest_attach_points,
 )
 from mechchar.core.character import (  # noqa: E402
-    LEG_ATTACH,
-    LEG_DEFAULT_ELLIPSE,
-    LEG_MARKER,
+    LEG_SPEC,
+    PUSHING_MAN_SPEC,
+    CharacterSpec,
     PartOverride,
     PointRef,
     apply_overrides,
     biped_character,
-    leg_character,
     leg_refs,
     merge_override,
     prefix_pose,
@@ -78,7 +77,8 @@ PERIOD_S = 4.0  # segundos por ciclo
 FAMILY_LABELS = {"four_bar": "cuadrilátero", "geared_five_bar": "5-bar con engranajes"}
 
 
-SCENES = ("Curva libre", "Pierna de prueba", "Bípedo")
+SCENES = ("Curva libre", "Pierna de prueba", "Bípedo", "Pushing Man")
+SCENE_SPECS = {1: LEG_SPEC, 2: LEG_SPEC, 3: PUSHING_MAN_SPEC}  # personaje de cada escena
 LEG_PREFIXES = ("l_", "r_")
 GAIT_PHASES = (0.0, 0.5)  # marcha alternada: una pierna medio ciclo detrás de la otra
 
@@ -135,8 +135,9 @@ class MainWindow(Gtk.ApplicationWindow):
         self.current_file: str | None = None
         self.mech_bounds: tuple[float, float, float, float] | None = None
         # Puntos elegidos sobre el personaje (escenas con pierna) y su diagnóstico.
-        self.attach_ref: PointRef = LEG_ATTACH
-        self.marker_ref: PointRef = LEG_MARKER
+        self.spec: CharacterSpec = LEG_SPEC  # el personaje de la escena actual
+        self.attach_ref: PointRef = LEG_SPEC.attach
+        self.marker_ref: PointRef = LEG_SPEC.marker
         self.advice: ActuationAdvice | None = None
         # Cambios del usuario sobre las piezas (z y fijas) de la pierna sola; el bípedo los hereda.
         self.part_overrides: tuple[PartOverride, ...] = ()
@@ -281,7 +282,7 @@ class MainWindow(Gtk.ApplicationWindow):
         scroller.set_vexpand(True)
 
         # Edición de una pieza: plano de profundidad z y si es fija (chasis).
-        self.part_names = [part.name for part in leg_character().parts]
+        self.part_names = [part.name for part in LEG_SPEC.factory(()).parts]
         self.part_dropdown = Gtk.DropDown.new_from_strings(self.part_names)
         self.part_z = Gtk.SpinButton.new_with_range(-10.0, 10.0, 0.5)
         self.part_z.set_digits(1)
@@ -640,23 +641,23 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def set_scene(self, index: int) -> None:
         """0 = curva libre; 1 = pierna de prueba con el marcador en el pie; 2 = bípedo (el ajuste de
-        una pierna se usa en las dos, con un desfase por pierna)."""
+        una pierna se usa en las dos, con un desfase por pierna); 3 = Pushing Man (el marcador en
+        la mano)."""
         self._clear_result()
         self.biped = index == 2
         self.phase_row.set_visible(self.biped)
         vp = self.canvas.viewport
-        self.attach_ref, self.marker_ref, self._suggest_i = LEG_ATTACH, LEG_MARKER, 0
+        self.spec = SCENE_SPECS.get(index, LEG_SPEC)
+        self.attach_ref, self.marker_ref, self._suggest_i = self.spec.attach, self.spec.marker, 0
         self.part_overrides = ()
-        if index in (1, 2):
+        if index in SCENE_SPECS:
             self._rebuild_leg_families()
-            cx, cy, ea, eb = LEG_DEFAULT_ELLIPSE
+            cx, cy, ea, eb = self.spec.ellipse
             self.editor.points = default_points(8, ea, eb, (cx, cy))
-            vp.fit_bounds(-1.5, -3.2, 2.5, 0.6, self.canvas.get_width(), self.canvas.get_height())
+            x0, y0, x1, y1 = self.spec.view
+            vp.fit_bounds(x0, y0, x1, y1, self.canvas.get_width(), self.canvas.get_height())
             self.status.set_text(
-                "Pierna de prueba: arrastrá la curva que debe dibujar la punta del pie "
-                "(punto rojo); el naranja es donde se une el mecanismo. Podés cambiarlos con "
-                "«Actuación» y «Marcador». El pie solo llega a una franja diagonal: te aviso si "
-                "la curva se sale. Presioná «Ajustar»."
+                self.spec.intro
                 + (" Después, un slider de desfase por pierna." if index == 2 else "")
             )
         else:
@@ -727,12 +728,13 @@ class MainWindow(Gtk.ApplicationWindow):
         if not report.ok:
             self.status.set_text(
                 f"Atención: {report.n_outside} de {report.n_points} puntos de la curva quedan "
-                f"fuera del alcance de la pierna (al peor le faltan {report.worst:.2f}). El "
-                "ajuste no podrá recorrerlos: acercá la curva a la franja diagonal que alcanza "
-                "el pie."
+                f"fuera del alcance de {self.spec.who} (al peor le faltan {report.worst:.2f}). El "
+                f"ajuste no podrá recorrerlos: acercá la curva a {self.spec.reach_zone}."
             )
         elif not self.reach_ok:
-            self.status.set_text("La curva está al alcance de la pierna. Presioná «Ajustar».")
+            self.status.set_text(
+                f"La curva está al alcance de {self.spec.who}. Presioná «Ajustar»."
+            )
         self.reach_ok = report.ok
         return False
 
@@ -905,8 +907,8 @@ class MainWindow(Gtk.ApplicationWindow):
                 toggle.set_active(False)
 
     def _leg(self) -> Any:
-        """La pierna de prueba con los cambios del usuario sobre sus piezas."""
-        return leg_character(self.part_overrides)
+        """El personaje de la escena con los cambios del usuario sobre sus piezas."""
+        return self.spec.factory(self.part_overrides)
 
     def _rebuild_leg_families(self) -> None:
         """Arma las familias con personaje para los puntos elegidos y rehace el diagnóstico."""
@@ -915,6 +917,7 @@ class MainWindow(Gtk.ApplicationWindow):
             CharacterFamily(base, leg, self.attach_ref, self.marker_ref) for base in ALL_FAMILIES
         )
         self.picker.character = leg
+        self._set_part_names([part.name for part in leg.parts])
         self.advice = advise(leg, self.attach_ref, self.marker_ref)
         self._refresh_properties()
 
@@ -969,12 +972,24 @@ class MainWindow(Gtk.ApplicationWindow):
             "pista de primer orden, no un pronóstico del error). «Sugerir» de nuevo muestra otro."
         )
 
+    def _set_part_names(self, names: list[str]) -> None:
+        """Pone en el selector las piezas del personaje de la escena (cambian entre escenas)."""
+        if names == self.part_names:
+            return
+        self.part_names = names
+        self._updating_part_controls = True  # el modelo nuevo no debe disparar cambios
+        try:
+            self.part_dropdown.set_model(Gtk.StringList.new(names))
+            self.part_dropdown.set_selected(0)
+        finally:
+            self._updating_part_controls = False
+
     def _apply_picks(self, attach: PointPick | None, marker: PointPick | None) -> None:
         """Pone los puntos de una foto (``None`` = los de la escena); si una pieza ya no existe,
         usa el punto por defecto y lo avisa."""
         leg = self._leg()
         refs: list[PointRef] = []
-        for pick, default in ((attach, LEG_ATTACH), (marker, LEG_MARKER)):
+        for pick, default in ((attach, self.spec.attach), (marker, self.spec.marker)):
             if pick is None:
                 refs.append(default)
                 continue
@@ -991,7 +1006,7 @@ class MainWindow(Gtk.ApplicationWindow):
     def _valid_parts(self, parts: tuple[PartOverride, ...]) -> tuple[PartOverride, ...]:
         """Los cambios de una foto, o ninguno (con aviso) si nombran una pieza que no existe."""
         try:
-            apply_overrides(leg_character(), parts)
+            apply_overrides(self.spec.factory(()), parts)
         except ValueError as exc:
             self.status.set_text(f"Se ignoraron los cambios de piezas del proyecto: {exc}.")
             return ()
