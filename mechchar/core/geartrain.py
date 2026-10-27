@@ -156,7 +156,29 @@ def _place(
     ]
 
 
-def connect(a: Gear, b: Gear, inner_teeth: Sequence[int], side: int = 1) -> list[Gear] | None:
+def _free(chain_: Sequence[Gear], avoid: Sequence[Gear]) -> bool:
+    """La cadena no se pisa a sí misma (salvo los vecinos, que engranan) ni con ``avoid``. No
+    revisa el engrane: ``_place`` lo deja exacto por construcción."""
+    n = len(chain_)
+    for i in range(n):
+        g = chain_[i]
+        for j in range(i + 2, n):
+            h = chain_[j]
+            if abs(g.z - h.z) <= LAYER_TOL and distance(g, h) < g.radius + h.radius - OVERLAP_TOL:
+                return False
+        for h in avoid:
+            if abs(g.z - h.z) <= LAYER_TOL and distance(g, h) < g.radius + h.radius - OVERLAP_TOL:
+                return False
+    return True
+
+
+def connect(
+    a: Gear,
+    b: Gear,
+    inner_teeth: Sequence[int],
+    side: int = 1,
+    avoid: Sequence[Gear] = (),
+) -> list[Gear] | None:
     """Intermedios que unen los extremos ``a`` y ``b`` (que ya están en su lugar), o ``None`` si no
     hay forma de engranarlos con esos dientes sin que se pisen.
 
@@ -166,7 +188,9 @@ def connect(a: Gear, b: Gear, inner_teeth: Sequence[int], side: int = 1) -> list
     ángulo libre y el último cierra con ``b`` cortando dos circunferencias; se prueba cada grado
     desde el más recto (0°) hasta el más torcido y se devuelve la primera cadena válida, es decir
     la más recta que engrana sin pisarse. ``side`` = +1 / −1 hace que la cadena se doble hacia la
-    izquierda / derecha de la recta de ``a`` a ``b``.
+    izquierda / derecha de la recta de ``a`` a ``b``. ``avoid`` son otros engranajes (de la misma
+    capa) que la cadena tampoco puede pisar: el ángulo se sigue buscando hasta dar con uno libre,
+    en lugar de devolver una cadena válida por sí sola que después haya que descartar.
 
     Límite: la familia «fila recta + cierre» no encuentra cadenas en zigzag, así que con varios
     intermedios chicos entre ejes cercanos (p. ej. cuatro de 10 dientes a 20 de distancia, con
@@ -178,14 +202,17 @@ def connect(a: Gear, b: Gear, inner_teeth: Sequence[int], side: int = 1) -> list
         raise ValueError("los dos ejes coinciden")
     inner = [Gear(0.0, 0.0, t, a.module, a.z) for t in inner_teeth]  # valida los dientes
     if not inner:
-        return [] if meshes(a, b) else None
+        return [] if meshes(a, b) and _free([a, b], avoid) else None
+    reach = a.radius + b.radius + 2.0 * sum(g.radius for g in inner)
+    if distance(a, b) > reach + OVERLAP_TOL:
+        return None  # ni en línea recta llegan: no hay que buscar ángulos
     sign = 1 if side >= 0 else -1
     angles = [0.0] if len(inner) == 1 else [
         sign * math.radians(d) for d in range(0, 181)
     ]
     for angle in angles:
         for placed in _place(a, b, inner, angle, sign):
-            if not chain_problems([a, *placed, b]):
+            if _free([a, *placed, b], avoid):
                 return placed
     return None
 

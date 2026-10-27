@@ -227,3 +227,54 @@ def test_simulate_refuses_a_train_that_does_not_mesh() -> None:
         simulate_angles([A])
     with pytest.raises(ValueError, match="al menos dos"):
         speed_ratio([A])
+
+
+# --- evitar otros engranajes -------------------------------------------------------------------
+
+
+def test_connect_avoids_the_gears_it_is_told_to_avoid() -> None:
+    """A distancia 34, con un engranaje de 10 dientes sobre el primer intermedio de la cadena
+    [12, 14] más recta, hay otra cadena (más torcida) que lo esquiva (configuración medida)."""
+    far = Gear(34.0, 0.0, 20, M)
+    free = connect(A, far, [12, 14]) or []
+    assert free
+    blocker = Gear(free[0].x, free[0].y, 10, M)
+    around = connect(A, far, [12, 14], avoid=[blocker])
+    assert around is not None
+    assert (around[0].x, around[0].y) != pytest.approx((free[0].x, free[0].y))
+    full = [A, *around, far]
+    assert chain_problems(full) == []
+    assert overlaps([*full, blocker], ignore={frozenset((i, i + 1)) for i in range(3)}) == []
+
+
+def test_a_blocker_that_leaves_no_feasible_angle_leaves_no_chain() -> None:
+    """A distancia 42 el mismo bloqueador tapa todos los ángulos válidos (configuración medida)."""
+    far = Gear(42.0, 0.0, 20, M)
+    free = connect(A, far, [12, 14]) or []
+    assert free
+    assert connect(A, far, [12, 14], avoid=[Gear(free[0].x, free[0].y, 10, M)]) is None
+
+
+def test_connect_gives_up_when_everything_is_blocked() -> None:
+    wall = Gear(10.0, 5.0, 60, M)  # un engranaje enorme sobre la zona por la que pasa la cadena
+    assert connect(A, B, [12, 14], avoid=[wall]) is None
+
+
+def test_avoid_ignores_gears_in_other_layers() -> None:
+    free = connect(A, B, [12, 14]) or []
+    other_layer = Gear(free[0].x, free[0].y, 10, M, z=3.0)
+    assert connect(A, B, [12, 14], avoid=[other_layer]) == free
+
+
+def test_direct_mesh_also_respects_avoid() -> None:
+    assert connect(A, B, [], avoid=[Gear(10.0, 0.0, 10, M)]) is None
+    assert connect(A, B, [], avoid=[Gear(10.0, 40.0, 10, M)]) == []
+
+
+def test_too_far_for_the_chain_is_rejected_without_searching() -> None:
+    import time
+
+    far = Gear(500.0, 0.0, 20, M)
+    t0 = time.perf_counter()
+    assert connect(A, far, [12, 14, 12]) is None
+    assert time.perf_counter() - t0 < 0.05  # ni en línea recta llega: no se barren los 181 ángulos
