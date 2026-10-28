@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from typing import Any
 
 import numpy as np
 
 from mechchar.core.assembly import world_point
 from mechchar.core.character import Character, Part, PointRef, RiggedMechanism
+from mechchar.core.gearnet import GearTrain
+from mechchar.core.gearshape import gear_outline, gear_rotations
 from mechchar.core.mechanisms import FourBar, GearedFiveBar, SliderCrank
 from mechchar.core.rig import MultiRig
 from mechchar.core.viewport import Viewport
@@ -19,6 +21,14 @@ TRACER_COLOR = (0.85, 0.15, 0.15)
 GEAR_FILL = (0.86, 0.68, 0.25, 0.35)  # dorado translúcido, como en el video
 GEAR_EDGE = (0.55, 0.40, 0.05)
 PROGRESS_COLOR = (0.95, 0.5, 0.05)
+LAYER_FILLS = (  # un color por capa del tren, dorado primero como en el video
+    (0.86, 0.68, 0.25, 0.45),
+    (0.29, 0.47, 0.76, 0.45),
+    (0.29, 0.63, 0.42, 0.45),
+    (0.71, 0.32, 0.48, 0.45),
+)
+SELECTED_FILL = (0.05, 0.12, 0.45, 0.6)  # azul oscuro: engranajes de los ejes elegidos
+INPUT_FILL = (0.95, 0.5, 0.05, 0.6)  # naranja: engranajes del eje de entrada
 
 
 def _screen(vp: Viewport, p: np.ndarray) -> tuple[float, float]:
@@ -280,3 +290,38 @@ def draw_progress_curve(cr: Any, vp: Viewport, curve: np.ndarray) -> None:
         cr.line_to(*_screen(vp, p))
     cr.close_path()
     cr.stroke()
+
+
+def draw_gear_train(
+    cr: Any,
+    vp: Viewport,
+    train: GearTrain,
+    theta: float = 0.0,
+    selected: Collection[int] = (),
+) -> None:
+    """Red de engranajes con dientes, girada ``theta`` (radianes del eje de entrada).
+
+    Cada conexión tiene el color de su capa; los engranajes de los ejes en ``selected`` (índices
+    en ``train.axes``) van en azul oscuro y los del eje de entrada en naranja. Se dibuja un punto
+    en cada eje."""
+    for c, rots in zip(train.connections, gear_rotations(train, theta), strict=True):
+        base = LAYER_FILLS[c.layer % len(LAYER_FILLS)]
+        for k, (g, rot) in enumerate(zip(c.gears, rots, strict=True)):
+            axis = c.a if k == 0 else c.b if k == len(c.gears) - 1 else None
+            fill = base
+            if axis is not None and axis in selected:
+                fill = SELECTED_FILL
+            elif axis is not None and axis == train.root:
+                fill = INPUT_FILL
+            pts = gear_outline(g, rot)
+            cr.move_to(*_screen(vp, pts[0]))
+            for p in pts[1:]:
+                cr.line_to(*_screen(vp, p))
+            cr.close_path()
+            cr.set_source_rgba(*fill)
+            cr.fill_preserve()
+            cr.set_source_rgb(*GEAR_EDGE)
+            cr.set_line_width(1.2)
+            cr.stroke()
+    for a in train.axes:
+        _joint(cr, vp, np.array([a.x, a.y]), 3.5)
