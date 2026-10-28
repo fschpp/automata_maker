@@ -14,7 +14,7 @@ dependencies = ["numpy", "scipy", "shapely"]
 ui = ["PyGObject"]
 layers = ["ortools"]
 export = ["trimesh"]
-dev = ["pytest", "pytest-benchmark", "ruff", "mypy"]
+dev = ["pytest", "pytest-benchmark", "ruff", "mypy", "ortools"]
 
 [project.scripts]
 mechchar = "mechchar.cli:main"
