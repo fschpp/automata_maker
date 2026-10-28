@@ -122,7 +122,9 @@ def test_the_side_mirrors_the_chain() -> None:
     for inner in ([12, 14], [12, 12, 12]):
         up, down = connect(A, B, inner, side=1), connect(A, B, inner, side=-1)
         assert up and down
-        assert [(g.x, g.y) for g in up] == pytest.approx([(g.x, -g.y) for g in down])
+        flat_up = [v for g in up for v in (g.x, g.y)]
+        flat_down = [v for g in down for v in (g.x, -g.y)]
+        assert flat_up == pytest.approx(flat_down)
 
 
 @pytest.mark.parametrize("inner", [[20], [10], [12, 14], [12, 12], [12, 12, 12], [10, 10, 10]])
