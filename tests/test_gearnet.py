@@ -8,6 +8,7 @@ import pytest
 from mechchar.core.gearnet import (
     END_FILL,
     Axis,
+    input_axis,
     module_for,
     plan_train,
     simulate_train,
@@ -147,11 +148,11 @@ def test_the_root_can_be_any_axis() -> None:
         _assert_good(train)
 
 
-def test_a_single_axis_is_a_trivial_train_with_nothing_to_simulate() -> None:
+def test_a_single_axis_is_a_trivial_train_that_just_turns_with_the_input() -> None:
     train = plan_train([Axis("solo", 1, 1)])
     assert train.ok and train.connections == () and train.gears() == []
-    with pytest.raises(ValueError, match="nada que simular"):
-        simulate_train(train)
+    angles = simulate_train(train, 8)
+    assert angles[:, 0] == pytest.approx(2 * math.pi * np.arange(8) / 8)
 
 
 # --- capas -------------------------------------------------------------------------------------
@@ -211,10 +212,10 @@ def test_a_connection_that_cannot_be_made_is_reported_and_left_out() -> None:
 def test_bad_axes_are_rejected() -> None:
     with pytest.raises(ValueError, match="al menos un eje"):
         plan_train([])
-    with pytest.raises(ValueError, match="coinciden"):
-        plan_train([Axis("a", 0, 0), Axis("b", 0, 0)])
     with pytest.raises(ValueError, match="no finita"):
         plan_train([Axis("a", float("nan"), 0), Axis("b", 1, 0)])
+    with pytest.raises(ValueError, match="no existe"):
+        plan_train([Axis("a", 0, 0), Axis("b", 5, 0)], root=7)
 
 
 def test_the_plan_is_deterministic() -> None:
@@ -263,3 +264,168 @@ def test_planning_is_fast_even_in_a_crowded_layout() -> None:
 def test_the_minimum_teeth_are_respected_by_every_gear() -> None:
     train = plan_train([Axis("a", 0, 0), Axis("b", 8, 1), Axis("c", 3, 7, False)])
     assert min(g.teeth for g in train.gears()) >= MIN_TEETH
+
+
+# --- ejes que coinciden ------------------------------------------------------------------------
+
+
+def test_axes_in_the_same_place_share_a_shaft_and_need_no_gears() -> None:
+    """Las dos piernas del bípedo usan el mismo ajuste: sus ejes de entrada coinciden."""
+    train = plan_train([Axis("pierna izq", 0.1045, -0.9723), Axis("pierna der", 0.1045, -0.9723)])
+    assert train.ok and train.connections == () and train.shared == ((0, 1),)
+    angles = simulate_train(train, 8)
+    assert angles[:, 0] == pytest.approx(angles[:, 1])
+
+
+def test_coincident_axes_are_one_node_of_the_network() -> None:
+    axes = [Axis("a", 0, 0), Axis("a2", 0, 0), Axis("b", 10, 0), Axis("c", 10, 0)]
+    train = plan_train(axes)
+    assert train.ok and train.shared == ((0, 1), (2, 3))
+    assert len(train.connections) == 1  # entre los dos puntos; el resto comparte eje
+    c = train.connections[0]
+    assert (c.a, c.b) == (0, 2)  # indexada por el primer eje de cada grupo
+    assert c.same_direction is True
+
+
+def test_a_network_with_shared_shafts_turns_every_axis_at_the_right_speed() -> None:
+    axes = [Axis("a", 0, 0), Axis("a2", 0, 0), Axis("b", 8, 1), Axis("b2", 8, 1),
+            Axis("c", 3, 7, False), Axis("c2", 3, 7, False)]
+    train = plan_train(axes)
+    _assert_good(train)
+    speeds = _speeds(train)
+    assert speeds[0] == speeds[1] and speeds[2] == speeds[3] and speeds[4] == speeds[5]
+
+
+def test_coincident_axes_that_ask_for_opposite_directions_are_a_problem() -> None:
+    train = plan_train([Axis("a", 0, 0), Axis("a2", 0, 0, False), Axis("b", 9, 0)])
+    assert not train.ok
+    assert "sentidos opuestos" in train.problems[0] and "'a2'" in train.problems[0]
+    with pytest.raises(ValueError, match="problemas"):
+        simulate_train(train)
+
+
+def test_what_counts_as_the_same_place_is_a_tolerance() -> None:
+    near = plan_train([Axis("a", 0, 0), Axis("b", 1e-8, 0)])
+    assert near.shared == ((0, 1),) and near.connections == ()
+    apart = plan_train([Axis("a", 0, 0), Axis("b", 1e-3, 0)], module=1e-5)
+    assert apart.shared == ()  # a 1e-3 son ejes distintos (y demasiado juntos para engranar)
+
+
+def test_the_root_and_forced_counts_can_name_any_member_of_a_shared_shaft() -> None:
+    axes = [Axis("a", 0, 0), Axis("a2", 0, 0), Axis("b", 10, 0)]
+    train = plan_train(axes, root=1, intermediates={(1, 2): 3})
+    assert train.ok and train.root == 1
+    assert train.connections[0].intermediates == 3
+    _assert_good(train)
+
+
+# --- el eje de entrada de un mecanismo ---------------------------------------------------------
+
+
+def _built_mechanisms():
+    from mechchar.optim.families import ALL_FAMILIES
+
+    t = np.linspace(0, 2 * math.pi, 60, endpoint=False)
+    target = np.column_stack([3 + 1.2 * np.cos(t), 1 + 0.6 * np.sin(t)])
+    for fam in ALL_FAMILIES:
+        cand = fam.candidates(target, 40, 3000, 2, np.random.default_rng(0))
+        assert cand, f"{fam.name} no dio candidatos"
+        built = fam.build(cand[0].p0, cand[0].variant)
+        assert built is not None
+        yield fam.name, built
+
+
+def test_the_input_axis_does_not_move_while_the_crank_turns() -> None:
+    """Es el punto de la bancada alrededor del cual gira la pieza con el Input Driver, en las tres
+    familias: se mide viendo que ese punto de la pieza no se mueve a lo largo del ciclo."""
+    from mechchar.core.assembly import Drive, Pin, world_point
+
+    seen = 0
+    for name, built in _built_mechanisms():
+        axis = input_axis(built.asm, built.state0)
+        assert axis is not None, name
+        drive = next(c for c in built.asm.constraints if isinstance(c, Drive))
+        pin = next(c for c in built.asm.constraints if isinstance(c, Pin)
+                   and drive.comp in (c.a, c.b))
+        local, comp = (pin.pa, pin.a) if pin.a == drive.comp else (pin.pb, pin.b)
+        result = built.asm.trace_cycle(built.state0, 24)
+        assert result.ok, name
+        for state in result.states:
+            assert world_point(state, comp, local) == pytest.approx(axis, abs=1e-6), name
+        seen += 1
+    assert seen == 3
+
+
+def test_input_axis_is_none_without_a_driver_or_a_fixed_pivot() -> None:
+    from mechchar.core.assembly import Assembly, Drive, FixedState, Pin
+
+    asm = Assembly()
+    ground = asm.add_component("bancada")
+    asm.add(FixedState(ground, 0.0, 0.0, 0.0))
+    crank = asm.add_component("manivela", 1.0, 2.0, 0.0)
+    asm.add(Pin(ground, (1.0, 2.0), crank, (0.0, 0.0)))
+    assert input_axis(asm, asm.initial_state()) is None  # sin Input Driver
+    asm.add(Drive(crank))
+    assert input_axis(asm, asm.initial_state()) == pytest.approx((1.0, 2.0))
+    floating = Assembly()
+    floating.add_component("suelta", 0.0, 0.0, 0.0)
+    floating.add(Drive(0))
+    assert input_axis(floating, floating.initial_state()) is None  # no gira sobre un punto fijo
+
+
+@pytest.mark.parametrize("ground_first", [True, False])
+def test_input_axis_works_whichever_member_of_the_pin_is_the_ground(ground_first: bool) -> None:
+    """El eje es el punto del pin en la pieza con el Input Driver, sea el primer o el segundo
+    miembro del pin, y con el pivote fuera del origen de la pieza."""
+    from mechchar.core.assembly import Assembly, Drive, FixedState, Pin
+
+    asm = Assembly()
+    ground = asm.add_component("bancada")
+    asm.add(FixedState(ground, 0.0, 0.0, 0.0))
+    crank = asm.add_component("manivela", 1.0, 2.0, 0.0)  # su origen no es el pivote
+    pivot_on_crank = (0.5, 0.0)  # (1.5, 2.0) en el mundo
+    if ground_first:
+        asm.add(Pin(ground, (1.5, 2.0), crank, pivot_on_crank))
+    else:
+        asm.add(Pin(crank, pivot_on_crank, ground, (1.5, 2.0)))
+    asm.add(Drive(crank))
+    assert input_axis(asm, asm.initial_state()) == pytest.approx((1.5, 2.0))
+
+
+def test_input_axis_can_pick_one_of_several_drivers_in_a_joint_assembly() -> None:
+    from mechchar.core.assembly import Assembly, Drive, FixedState, Pin
+
+    asm = Assembly()
+    ground = asm.add_component("bancada")
+    asm.add(FixedState(ground, 0.0, 0.0, 0.0))
+    drives = []
+    for x in (1.0, 5.0):
+        crank = asm.add_component(f"manivela{x}", x, 0.0, 0.0)
+        asm.add(Pin(ground, (x, 0.0), crank, (0.0, 0.0)))
+        drive = Drive(crank)
+        asm.add(drive)
+        drives.append(drive)
+    state = asm.initial_state()
+    assert input_axis(asm, state) == pytest.approx((1.0, 0.0))  # por defecto, el primero
+    assert input_axis(asm, state, drives[0]) == pytest.approx((1.0, 0.0))
+    assert input_axis(asm, state, drives[1]) == pytest.approx((5.0, 0.0))
+
+
+def test_describe_train_says_what_the_network_is() -> None:
+    from mechchar.core.gearnet import describe_train
+
+    one = describe_train(plan_train([Axis("solo", 0, 0)]))
+    assert one == ("Hay un solo mecanismo: no hace falta ningún engranaje.", True)
+    text, ok = describe_train(plan_train([Axis("a", 1.5, -2), Axis("b", 1.5, -2)]))
+    assert ok and "comparten el eje de entrada en (1.50, -2.00)" in text
+    assert "sin engranajes" in text
+    train = plan_train([Axis("a", 0, 0), Axis("b", 8, 1), Axis("c", 3, 7, False)])
+    text, ok = describe_train(train)
+    layers = len({c.layer for c in train.connections})
+    assert ok and text.startswith(f"{len(train.gears())} engranajes en {layers} capa")
+    assert f"módulo {train.module:.3g}" in text and f"{train.end_teeth} dientes" in text
+    pair = plan_train([Axis("a", 0, 0), Axis("a2", 0, 0), Axis("b", 8, 1)])
+    shared_text, ok = describe_train(pair)
+    assert ok and shared_text.endswith("1 eje compartido.")
+    text, ok = describe_train(plan_train([Axis("a", 0, 0), Axis("b", 0, 0, False)]))
+    assert not ok and "sentidos opuestos" in text

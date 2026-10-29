@@ -29,6 +29,7 @@ from mechchar.core.character import (  # noqa: E402
     merge_override,
     prefix_pose,
 )
+from mechchar.core.gearnet import Axis, describe_train, input_axis, plan_train  # noqa: E402
 from mechchar.core.kinematics import ReachReport, reach_report  # noqa: E402
 from mechchar.core.playback import Playback  # noqa: E402
 from mechchar.core.project import (  # noqa: E402
@@ -1123,7 +1124,22 @@ class MainWindow(Gtk.ApplicationWindow):
             lines += ["", "<b>Desfases</b>"]
             for sub, phase in zip(self.mech.subs, self.mech.phases, strict=True):
                 lines.append(f"{esc(sub.name)}: {phase:.2f} ciclo")
+            lines += ["", "<b>Tren de engranajes</b>"]
+            text, train_ok = self._train_summary(self.mech)
+            color = "#1a7f37" if train_ok else "#b3261e"
+            lines.append(f'<span foreground="{color}">{esc(text)}</span>')
         self.props.set_markup("\n".join(lines))
+
+    @staticmethod
+    def _train_summary(rig: MultiRig) -> tuple[str, bool]:
+        """Estado del tren de engranajes que une los ejes de entrada de los mecanismos del rig."""
+        axes = []
+        for sub in rig.subs:
+            xy = input_axis(rig.asm, rig.state0, sub.drive)
+            if xy is None:
+                return f"No se pudo ubicar el eje de entrada de «{sub.name}».", False
+            axes.append(Axis(sub.name, xy[0], xy[1]))
+        return describe_train(plan_train(axes))
 
     def _on_box_changed(self) -> None:
         self.box = self.box_editor.box
