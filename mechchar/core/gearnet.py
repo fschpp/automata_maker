@@ -121,6 +121,89 @@ def spanning_tree(axes: Sequence[Axis], root: int = 0) -> list[tuple[int, int]]:
     return edges
 
 
+def oriented_tree(n: int, links: Sequence[tuple[int, int]], root: int = 0) -> list[tuple[int, int]]:
+    """Pares elegidos, orientados desde ``root`` (``a`` es el más cercano a la entrada) y en el
+    orden en que se alcanzan (de a uno por nivel). Tienen que ser un árbol que una los ``n``
+    ejes: si no, ``ValueError`` con el motivo (índice fuera de rango, par repetido, eje sin
+    unir o lazo)."""
+    if not 0 <= root < n:
+        raise ValueError("el eje de entrada no existe")
+    seen: set[frozenset[int]] = set()
+    neighbours: dict[int, list[int]] = {i: [] for i in range(n)}
+    for a, b in links:
+        if not (0 <= a < n and 0 <= b < n):
+            raise ValueError(f"el par ({a}, {b}) usa un eje que no existe")
+        if a == b:
+            raise ValueError(f"el par ({a}, {b}) une un eje consigo mismo")
+        key = frozenset((a, b))
+        if key in seen:
+            raise ValueError(f"el par ({a}, {b}) está repetido")
+        seen.add(key)
+        neighbours[a].append(b)
+        neighbours[b].append(a)
+    order: list[tuple[int, int]] = []
+    reached = {root}
+    queue = [root]
+    for a in queue:
+        for b in sorted(neighbours[a]):
+            if b not in reached:
+                reached.add(b)
+                order.append((a, b))
+                queue.append(b)
+    if len(reached) != n:
+        missing = ", ".join(str(i) for i in range(n) if i not in reached)
+        raise ValueError(
+            f"los pares elegidos no unen todos los ejes con la entrada: faltan {missing}"
+        )
+    if len(links) > n - 1:
+        raise ValueError(
+            f"los pares elegidos forman un lazo ({len(links)} pares para {n} ejes): "
+            "una red de engranajes en lazo no se puede armar"
+        )
+    return order
+
+
+def complete_links(
+    axes: Sequence[Axis], links: Sequence[tuple[int, int]] = ()
+) -> list[tuple[int, int]]:
+    """Los pares ``links`` que eligió el usuario más los más cortos que faltan para unir todos
+    los ejes (Kruskal). Los ejes que coinciden ya comparten un eje y no se unen entre sí. Lanza
+    ``ValueError`` si un par es inválido o cierra un lazo."""
+    n = len(axes)
+    rep = representatives(axes)
+    parent = {r: r for r in set(rep)}
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    out: list[tuple[int, int]] = []
+    for a, b in links:
+        if not (0 <= a < n and 0 <= b < n):
+            raise ValueError(f"el par ({a}, {b}) usa un eje que no existe")
+        ra, rb = find(rep[a]), find(rep[b])
+        if rep[a] == rep[b]:
+            raise ValueError(f"los ejes {a} y {b} coinciden: ya comparten el eje")
+        if ra == rb:
+            raise ValueError(f"el par ({a}, {b}) cierra un lazo con los anteriores")
+        parent[ra] = rb
+        out.append((a, b))
+    rest = sorted(
+        (_distance(axes[a], axes[b]), a, b)
+        for a in sorted(set(rep))
+        for b in sorted(set(rep))
+        if a < b
+    )
+    for _, a, b in rest:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+            out.append((a, b))
+    return out
+
+
 def _check_axes(axes: Sequence[Axis]) -> None:
     for p in axes:
         if not all(math.isfinite(v) for v in (p.x, p.y)):
@@ -226,8 +309,13 @@ def plan_train(
     module: float | None = None,
     intermediates: Mapping[tuple[int, int], int] | None = None,
     layer_pitch: float = 1.0,
+    links: Sequence[tuple[int, int]] | None = None,
 ) -> GearTrain:
     """Une todos los ejes al de entrada ``root`` con una red de engranajes (ver el módulo).
+
+    ``links`` son los pares de ejes que elige el usuario (en cualquier orden): tienen que formar
+    un árbol que una todos los ejes (``complete_links`` completa los que falten); si no se dan,
+    se usa el árbol de expansión mínimo. Los ejes que coinciden cuentan como uno solo.
 
     ``module`` fija el módulo (si no, sale de las distancias). ``intermediates`` fuerza la
     cantidad de intermedios de una conexión, indexada por el par de ejes (en cualquier orden); tiene
@@ -264,7 +352,17 @@ def plan_train(
     forced = {
         frozenset(index[rep[i]] for i in k): v for k, v in (intermediates or {}).items()
     }
-    result = _plan_unique(sub, index[rep[root]], module, forced, layer_pitch)
+    edges = None
+    if links is not None:
+        mapped = []
+        for a, b in links:
+            if not (0 <= a < len(axes) and 0 <= b < len(axes)):
+                raise ValueError(f"el par ({a}, {b}) usa un eje que no existe")
+            if rep[a] == rep[b]:
+                raise ValueError(f"los ejes {a} y {b} coinciden: ya comparten el eje")
+            mapped.append((index[rep[a]], index[rep[b]]))
+        edges = oriented_tree(len(sub), mapped, index[rep[root]])
+    result = _plan_unique(sub, index[rep[root]], module, forced, layer_pitch, edges)
     connections = tuple(
         Connection(unique[c.a], unique[c.b], c.gears, c.layer, c.same_direction)
         for c in result.connections
@@ -281,10 +379,12 @@ def _plan_unique(
     module: float | None,
     forced: Mapping[frozenset[int], int],
     layer_pitch: float,
+    edges: Sequence[tuple[int, int]] | None = None,
 ) -> GearTrain:
     """``plan_train`` para ejes todos en posiciones distintas."""
     axes = tuple(axes)
-    edges = spanning_tree(axes, root)
+    if edges is None:
+        edges = spanning_tree(axes, root)
     m = module if module is not None else module_for(axes, edges)
     if not (math.isfinite(m) and m > 0.0):
         raise ValueError("el módulo debe ser positivo")
@@ -432,3 +532,61 @@ def describe_train(train: GearTrain) -> tuple[str, bool]:
             "s." if len(train.shared) != 1 else "."
         )
     return text, True
+
+
+# --- ejes cilíndricos --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Axle:
+    """Eje cilíndrico perpendicular a las capas que sostiene los engranajes de un punto: va de
+    ``z0`` (la cara inferior del engranaje más bajo) a ``z1`` (la superior del más alto, más lo
+    que sobresale si es el de entrada)."""
+
+    name: str
+    x: float
+    y: float
+    z0: float
+    z1: float
+    gears: int  # cuántos engranajes lleva
+    input: bool = False  # el eje de entrada sobresale para acoplar una manivela o un motor
+
+    @property
+    def length(self) -> float:
+        return self.z1 - self.z0
+
+
+def axles(train: GearTrain, thickness: float = 1.0, protrusion: float = 2.0) -> list[Axle]:
+    """Un eje por cada punto con engranajes: los de los ejes de los mecanismos (uno solo aunque
+    lleven engranajes de varias conexiones apiladas en capas distintas, y aunque coincidan varios
+    mecanismos) y los de cada intermedio. ``thickness`` es el espesor de un engranaje y
+    ``protrusion`` cuánto sobresale el eje de entrada por encima del engranaje más alto."""
+    if thickness <= 0.0 or protrusion < 0.0:
+        raise ValueError("el espesor debe ser positivo y lo que sobresale no puede ser negativo")
+    rep = representatives(train.axes)
+    root = rep[train.root]
+    on_axis: dict[int, list[Gear]] = {}
+    out: list[Axle] = []
+    for n, c in enumerate(train.connections):
+        on_axis.setdefault(c.a, []).append(c.gears[0])
+        on_axis.setdefault(c.b, []).append(c.gears[-1])
+        for k, g in enumerate(c.gears[1:-1], start=1):
+            out.append(Axle(f"intermedio {n + 1}.{k}", g.x, g.y, g.z, g.z + thickness, 1))
+    first = []
+    for i in sorted(on_axis):
+        gs = on_axis[i]
+        z0 = min(g.z for g in gs)
+        top = max(g.z for g in gs) + thickness
+        is_input = i == root
+        first.append(
+            Axle(
+                train.axes[i].name,
+                train.axes[i].x,
+                train.axes[i].y,
+                z0,
+                top + (protrusion if is_input else 0.0),
+                len(gs),
+                is_input,
+            )
+        )
+    return first + out
