@@ -9,7 +9,7 @@ import numpy as np
 
 from mechchar.core.assembly import world_point
 from mechchar.core.character import Character, Part, PointRef, RiggedMechanism
-from mechchar.core.gearnet import GearTrain
+from mechchar.core.gearnet import GearTrain, representatives
 from mechchar.core.gearshape import gear_outline, gear_rotations
 from mechchar.core.mechanisms import FourBar, GearedFiveBar, SliderCrank
 from mechchar.core.rig import MultiRig
@@ -304,14 +304,18 @@ def draw_gear_train(
     Cada conexión tiene el color de su capa; los engranajes de los ejes en ``selected`` (índices
     en ``train.axes``) van en azul oscuro y los del eje de entrada en naranja. Se dibuja un punto
     en cada eje."""
+    # los ejes que coinciden comparten un eje y las conexiones usan el primero de cada grupo
+    rep = representatives(train.axes)
+    chosen = {rep[i] for i in selected}
+    root = rep[train.root]
     for c, rots in zip(train.connections, gear_rotations(train, theta), strict=True):
         base = LAYER_FILLS[c.layer % len(LAYER_FILLS)]
         for k, (g, rot) in enumerate(zip(c.gears, rots, strict=True)):
             axis = c.a if k == 0 else c.b if k == len(c.gears) - 1 else None
             fill = base
-            if axis is not None and axis in selected:
+            if axis is not None and axis in chosen:
                 fill = SELECTED_FILL
-            elif axis is not None and axis == train.root:
+            elif axis is not None and axis == root:
                 fill = INPUT_FILL
             pts = gear_outline(g, rot)
             cr.move_to(*_screen(vp, pts[0]))

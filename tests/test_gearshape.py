@@ -173,3 +173,51 @@ def test_odd_teeth_and_oblique_neighbours_mesh_without_overlap(z_a, z_b, angle):
     assert pa.intersection(pb).area < 0.01 * tooth
     wrong = Polygon(gear_outline(b, mesh_phase(a, rot_a, b) + math.pi / z_b))  # tooth on tooth
     assert pa.intersection(wrong).area > 0.05 * tooth
+
+
+# --- ejes que coinciden (el tren los comparte) -------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def shared_train():
+    # el 1 y el 2 están en el mismo punto: un solo eje, y las conexiones usan el 1
+    t = plan_train([Axis("a", 0, 0), Axis("b", 9, 1), Axis("c", 9, 1)], 2)
+    assert t.ok and t.shared == ((1, 2),) and len(t.connections) == 1
+    return t
+
+
+def test_the_input_is_orange_even_when_it_is_not_the_first_of_its_shared_axis(shared_train):
+    from mechchar.ui.scene import INPUT_FILL
+
+    cr = Recorder()
+    draw_gear_train(cr, Viewport(), shared_train)  # la entrada es el 2, las conexiones usan el 1
+    assert INPUT_FILL in cr.colors()
+
+
+def test_selecting_any_axis_of_a_shared_group_highlights_it(shared_train):
+    from mechchar.ui.scene import SELECTED_FILL
+
+    for i in (1, 2):
+        cr = Recorder()
+        draw_gear_train(cr, Viewport(), shared_train, selected={i})
+        assert SELECTED_FILL in cr.colors()
+    cr = Recorder()
+    draw_gear_train(cr, Viewport(), shared_train, selected=set())
+    assert SELECTED_FILL not in cr.colors()
+
+
+def test_a_train_with_shared_axes_turns_and_meshes_like_any_other(shared_train):
+    sim = simulate_train(shared_train, 12)
+    step = 5
+    theta = sim[step, shared_train.root]
+    c = shared_train.connections[0]
+    turned = [
+        r1 - r0
+        for r0, r1 in zip(
+            connection_rotations(shared_train, c, 0.0),
+            connection_rotations(shared_train, c, theta),
+            strict=True,
+        )
+    ]
+    assert turned[0] == pytest.approx(sim[step, c.a] - sim[0, c.a], abs=1e-9)
+    assert turned[-1] == pytest.approx(sim[step, c.b] - sim[0, c.b], abs=1e-9)

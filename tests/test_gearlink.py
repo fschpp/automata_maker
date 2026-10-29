@@ -45,28 +45,26 @@ def fake_rig(positions, ratios=None, grounded=True):
 def test_biped_legs_share_one_axis(leg_mechanism):  # noqa: F811
     rig = MultiRig(biped_character(), make_specs(leg_mechanism))
     ra = rig_axes(rig)
-    assert len(ra.axes) == 1 and ra.members == ((0, 1),) and ra.problems == ()
-    assert ra.axes[0].name == "l_leg+r_leg"
-    # el eje es el origen de la manivela en el estado del rig
+    assert [a.name for a in ra.axes] == ["l_leg", "r_leg"] and ra.members == ((0, 1),)
+    # el eje es el origen de la manivela en el estado del rig, el mismo para las dos piernas
     d = rig.subs[0].drive
-    assert (ra.axes[0].x, ra.axes[0].y) == pytest.approx(
-        (rig.state0[3 * d.comp], rig.state0[3 * d.comp + 1])
-    )
-    assert ra.axis_of(1) == 0
+    for a in ra.axes:
+        assert (a.x, a.y) == pytest.approx((rig.state0[3 * d.comp], rig.state0[3 * d.comp + 1]))
+    assert ra.axis_of(0) == ra.axis_of(1) == 0
 
 
 def test_coaxial_legs_need_no_gears(leg_mechanism):  # noqa: F811
     rig = MultiRig(biped_character(), make_specs(leg_mechanism))
     train, ra = plan_rig_train(rig)
     assert train.ok and train.connections == () and train_problems(train) == []
-    assert len(ra.axes) == 1
+    assert train.shared == ((0, 1),) and len(ra.members) == 1
 
 
 def test_coaxial_axes_that_turn_opposite_are_a_problem(leg_mechanism):  # noqa: F811
     rig = MultiRig(biped_character(), make_specs(leg_mechanism))
     rig.subs[1].drive.ratio = -1.0
     train, _ = plan_rig_train(rig)
-    assert not train.ok and "sentidos de giro opuestos" in train.problems[0]
+    assert not train.ok and "sentidos opuestos" in train.problems[0]
 
 
 # --- rig sencillo con ejes separados -----------------------------------------------------------
@@ -80,12 +78,23 @@ def test_axes_follow_the_state_given():
     assert [(a.x, a.y) for a in ra.axes] == [(0.0, 0.0), (12.0, 1.0)]
 
 
-def test_root_axis_comes_first_whatever_its_index():
+def test_the_root_is_the_mechanism_asked_for_and_axes_keep_the_order_of_the_rig():
     rig = fake_rig([(0.0, 0.0), (10.0, 0.0), (20.0, 5.0)])
     ra = rig_axes(rig, root=2)
-    assert ra.axes[0].name == "m2" and ra.members[0] == (2,)
+    assert [a.name for a in ra.axes] == ["m0", "m1", "m2"] and ra.root == 2
+    assert ra.members[0] == (2,)  # el grupo de la entrada va primero
     assert sorted(k for g in ra.members for k in g) == [0, 1, 2]
-    assert ra.axis_of(0) in (1, 2)
+    train, _ = plan_rig_train(rig, root=2)
+    assert train.ok and train.root == 2
+
+
+def test_axes_that_coincide_share_one_even_when_the_root_is_the_second():
+    rig = fake_rig([(0.0, 0.0), (9.0, 1.0), (9.0, 1.0)])
+    ra = rig_axes(rig, root=2)
+    assert ra.members == ((1, 2), (0,)) and ra.axis_of(2) == 1
+    train, _ = plan_rig_train(rig, root=2)
+    assert train.ok and train.shared == ((1, 2),) and len(train.connections) == 1
+    assert train_problems(train) == []
 
 
 def test_turning_the_other_way_sets_same_direction_false():
