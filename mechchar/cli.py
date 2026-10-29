@@ -11,6 +11,9 @@ from mechchar import __version__
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="mechchar")
     parser.add_argument("--version", action="store_true")
+    parser.add_argument(
+        "--gears", action="store_true", help="abre solo el editor de la red de engranajes"
+    )
     args = parser.parse_args(argv)
     if args.version:
         print(__version__)
@@ -28,7 +31,7 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
-    return run()
+    return run(gears=args.gears)
 
 
 if __name__ == "__main__":

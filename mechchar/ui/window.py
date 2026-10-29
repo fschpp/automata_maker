@@ -242,6 +242,10 @@ class MainWindow(Gtk.ApplicationWindow):
         for widget in row:
             controls.append(widget)
         controls.append(self.scale)
+        self.gears_button = Gtk.Button(label="Red de engranajes")
+        self.gears_button.set_tooltip_text("Abre el editor de la red de engranajes")
+        self.gears_button.connect("clicked", self._on_open_gears)
+        controls.append(self.gears_button)
         for margin in ("start", "end", "top", "bottom"):
             getattr(controls, f"set_margin_{margin}")(6)
         self.status.set_margin_start(8)
@@ -621,6 +625,14 @@ class MainWindow(Gtk.ApplicationWindow):
         )
 
     # --- escenas ---------------------------------------------------------
+    def _on_open_gears(self, _button: Gtk.Button) -> None:
+        from mechchar.ui.gear_scene import GearWindow
+
+        win = getattr(self, "_gear_window", None)
+        if win is None or not win.get_visible():
+            win = self._gear_window = GearWindow(self.get_application())
+        win.present()
+
     def _on_scene_changed(self, dropdown: Gtk.DropDown, _param: Any) -> None:
         if self.runner.busy or self._restoring:
             return
