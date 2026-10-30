@@ -283,3 +283,55 @@ def test_matches_brute_force_on_small_random_instances(seed):
     check_plan(bodies, plan, pins)
     assert (plan.n_layers, plan.pin_length) == (m, length)
     assert plan.optimal
+
+
+# --- engranajes que engranan -------------------------------------------------------------------
+
+
+def test_meshing_bodies_share_a_layer_and_their_overlap_is_not_a_collision():
+    a, b = still("a", 0, 0), still("b", 0.4, 0)  # se pisan a propósito
+    assert len(collisions([a, b])) == 1
+    assert collisions([a, b], ignore={frozenset((0, 1))}) == set()
+    plan = assign_layers([a, b], meshes=[("a", "b")])
+    assert plan.ok and plan.n_layers == 1 and plan.layers["a"] == plan.layers["b"]
+
+
+def test_a_third_body_that_hits_the_meshing_pair_goes_to_another_layer():
+    bs = [still("a", 0, 0), still("b", 0.4, 0), still("c", 0.2, 0.3)]
+    plan = assign_layers(bs, meshes=[("a", "b")])
+    assert plan.ok and plan.n_layers == 2
+    assert plan.layers["a"] == plan.layers["b"] != plan.layers["c"]
+
+
+def test_a_chain_of_meshes_keeps_the_whole_chain_in_one_layer():
+    # solo se pisan los vecinos (separación 0,9 con piezas de ancho 1)
+    bs = [still(f"g{i}", 0.9 * i, 0) for i in range(4)] + [still("x", 1.35, 0.2)]
+    plan = assign_layers(bs, meshes=[("g0", "g1"), ("g1", "g2"), ("g2", "g3")])
+    assert plan.ok and len({plan.layers[f"g{i}"] for i in range(4)}) == 1
+    assert plan.layers["x"] != plan.layers["g0"]
+
+
+def test_non_consecutive_gears_of_a_chain_that_overlap_make_it_infeasible():
+    # g0 y g2 se pisan pero no engranan entre sí, y la cadena los obliga a la misma capa
+    bs = [still(f"g{i}", 0.4 * i, 0) for i in range(3)]
+    plan = assign_layers(bs, meshes=[("g0", "g1"), ("g1", "g2")])
+    assert not plan.ok and plan.layers == {}
+
+
+def test_meshing_bodies_on_different_fixed_layers_have_no_solution():
+    bs = [still("a", 0, 0, layer=0), still("b", 0.4, 0, layer=1)]
+    assert not assign_layers(bs, meshes=[("a", "b")]).ok
+
+
+def test_mesh_input_validation():
+    bs = [still("a", 0, 0), still("b", 3, 0)]
+    with pytest.raises(ValueError, match="no existe"):
+        assign_layers(bs, meshes=[("a", "z")])
+    with pytest.raises(ValueError, match="consigo mismo"):
+        assign_layers(bs, meshes=[("a", "a")])
+
+
+def test_other_collisions_of_a_meshing_body_still_count():
+    bs = [still("a", 0, 0), still("b", 0.4, 0), still("c", 0.2, 0.3)]
+    pairs = collisions(bs, ignore={frozenset((0, 1))})
+    assert pair_names(bs, pairs) == {("a", "c"), ("b", "c")}

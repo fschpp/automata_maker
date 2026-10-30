@@ -13,6 +13,8 @@ contorno proyectado en cada paso del ciclo y devuelve la capa de cada una:
   paper. Los extremos se prohíben también porque en la capa de una pieza del pasador ya está su
   agujero; con un pasador dentro de sus piezas es lo mismo que prohibir solo «en medio» (esa
   pieza chocaría con la del extremo), y si el pasador no está dentro de ellas es la opción segura.
+* ``meshes``: pares de piezas que engranan (dos engranajes vecinos de una cadena). Tienen que ir
+  en la **misma** capa y sus dientes, que se tocan a propósito, no cuentan como choque entre sí.
 * ``assign_layers``: CP-SAT. Prueba con 1, 2, … capas hasta que haya solución (el mínimo) y con
   ese número minimiza el largo total de los pasadores (suma de ``max − min`` de capa de sus
   piezas) con un límite de tiempo.
@@ -26,7 +28,7 @@ respetan.
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -103,11 +105,15 @@ def _check_steps(bodies: Sequence[Body]) -> int:
 
 
 def collisions(
-    bodies: Sequence[Body], clearance: float = 0.0, tol: float = OVERLAP_TOL
+    bodies: Sequence[Body],
+    clearance: float = 0.0,
+    tol: float = OVERLAP_TOL,
+    ignore: Collection[frozenset[int]] = (),
 ) -> set[frozenset[int]]:
     """Pares (índices) de piezas que se pisan en algún paso del ciclo.
 
-    Con ``clearance`` > 0 también cuentan las que quedan a menos de esa distancia."""
+    Con ``clearance`` > 0 también cuentan las que quedan a menos de esa distancia. Los pares de
+    ``ignore`` (por ejemplo los engranajes que engranan) no se consideran."""
     if clearance < 0.0:
         raise ValueError("la holgura no puede ser negativa")
     _check_steps(bodies)
@@ -118,7 +124,7 @@ def collisions(
     for i, sw in enumerate(swept):
         for j in tree.query(sw, predicate="intersects"):
             j = int(j)
-            if j <= i or frozenset((i, j)) in out:
+            if j <= i or frozenset((i, j)) in out or frozenset((i, j)) in ignore:
                 continue
             for p, q in zip(polys[i], polys[j], strict=True):
                 grown = p.buffer(clearance) if clearance else p
@@ -171,6 +177,7 @@ def _solve(
     m: int,
     time_limit: float,
     minimize_pins: bool,
+    same_layer: Collection[frozenset[int]] = (),
 ) -> tuple[dict[str, int], int, bool] | None:
     index = {b.name: i for i, b in enumerate(bodies)}
     model = cp_model.CpModel()
@@ -183,6 +190,9 @@ def _solve(
     for pair in pairs:
         i, j = sorted(pair)
         model.Add(lay[i] != lay[j])
+    for pair in same_layer:
+        i, j = sorted(pair)
+        model.Add(lay[i] == lay[j])
     lows, highs = [], []
     for pin in pins:
         ids = [index[n] for n in pin.members]
@@ -223,6 +233,7 @@ def assign_layers(
     max_layers: int = 12,
     clearance: float = 0.0,
     time_limit: float = 10.0,
+    meshes: Sequence[tuple[str, str]] = (),
 ) -> LayerPlan:
     """Capa de cada pieza con el mínimo de capas y, con ese mínimo, pasadores lo más cortos.
 
@@ -233,20 +244,28 @@ def assign_layers(
     _check_steps(bodies)
     if not bodies:
         return LayerPlan({}, 0, 0, True)
-    pairs = collisions(bodies, clearance)
     index = {b.name: i for i, b in enumerate(bodies)}
+    same: set[frozenset[int]] = set()
+    for a, b in meshes:
+        for n in (a, b):
+            if n not in index:
+                raise ValueError(f"un par de engranajes nombra una pieza que no existe: {n!r}")
+        if a == b:
+            raise ValueError(f"{a!r} no engrana consigo mismo")
+        same.add(frozenset((index[a], index[b])))
+    pairs = collisions(bodies, clearance, ignore=same)
     for pin in pins:
         for n in pin.members:
             if n not in index:
                 raise ValueError(f"un pasador une una pieza que no existe: {n!r}")
     conflicts = pin_conflicts(bodies, pins, clearance)
     floor = max([b.layer + 1 for b in bodies if b.layer is not None], default=1)
-    start = max(floor, 2 if pairs or pins else 1)
+    start = max(floor, 2 if pairs or pins else 1)  # (los engranajes engranados comparten capa)
     for m in range(start, max_layers + 1):
-        found = _solve(bodies, pairs, pins, conflicts, m, time_limit, minimize_pins=False)
+        found = _solve(bodies, pairs, pins, conflicts, m, time_limit, False, same)
         if found is None:
             continue
-        best = _solve(bodies, pairs, pins, conflicts, m, time_limit, minimize_pins=True)
+        best = _solve(bodies, pairs, pins, conflicts, m, time_limit, True, same)
         layers, _, optimal = best if best is not None else found
         used = sorted(set(layers.values()))
         if all(b.layer is None for b in bodies):
